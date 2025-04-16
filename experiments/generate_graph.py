@@ -150,104 +150,135 @@ def distance_function(point1, point2, metric='euclidean', alpha=1.0):
     else:
         raise ValueError(f"Metric '{metric}' not supported")
 
+import numpy as np
+import networkx as nx
+
+# Assumes `generate_coordinates` and `distance_function` are defined in the same
+# module or imported earlier
+
+
 def generate_latent_geometry_graph(
-    cluster_sizes, 
-    dimension=DIMENSION, 
-    connectivity_threshold=CONNECTIVITY_THRESHOLD,
-    max_attempts=MAX_ATTEMPTS,
-    distance_metric='euclidean',
-    distance_alpha=1.0,
+    cluster_sizes,
+    dimension: int = 3,
+    connectivity_threshold: float | None = None,
+    max_attempts: int = 10,
+    distance_metric: str = "euclidean",
+    distance_alpha: float = 1.0,
+    edge_prob_fn=None,
     distributions=None,
-    dist_params=None
+    dist_params=None,
 ):
     """
-    Generate a graph with latent geometry in R^n space.
     
-    params: 
-    cluster_sizes : list
-        List with the number of vertices in each cluster
-    dimension : int
-        Dimension of the space
-    connectivity_threshold : float
-        Threshold for edge creation
-    max_attempts : int
-        Maximum attempts to get a connected graph
-    distance_metric : str
-        Metric to use for distance calculation
-    distance_alpha : float
-        Parameter for certain distance functions
-    distributions : list
-        List with the distribution to use for each cluster
-    dist_params : list
-        List with parameters for each distribution
-        
-    ret: 
-    nx.Graph
-        Generated graph
-    np.ndarray
-        Array with coordinates of each vertex
+    Generate a (connected) latent‑geometry graph in :math:`\mathbb R^{d}`.
+
+    Parameters
+    ----------
+    cluster_sizes : list[int]
+        Number of vertices in each cluster.
+    dimension : int, default=3
+        Dimensionality of the latent space.
+    connectivity_threshold : float | None, default=None
+        **Deterministic rule.** Create an edge whenever the pairwise distance
+        is *at most* this value. Ignored if ``edge_prob_fn`` is provided.
+    max_attempts : int, default=10
+        Retry limit to obtain a *connected* graph.
+    distance_metric : {"euclidean", "manhattan", "gaussian"}, default="euclidean"
+        Distance (or similarity‑to‑distance) metric.
+    distance_alpha : float, default=1.0
+        Scale parameter used by the "gaussian" metric in ``distance_function``.
+    edge_prob_fn : callable | None, default=None
+        **Probabilistic rule.** A function ``f(dist) -> p`` returning the edge
+        probability (``0 ≤ p ≤ 1``) given a pairwise distance. If supplied,
+        ``connectivity_threshold`` is ignored.
+    distributions : list[str] | None
+        Latent coordinate distribution per cluster ('uniform', 'normal', …).
+        Defaults to all 'uniform'.
+    dist_params : list[dict] | None
+        Extra kwargs passed to the coordinate generator per cluster.
+
+    Returns
+    -------
+    G : nx.Graph
+        Undirected graph with node attributes ``coords`` and ``cluster``.
+    coordinates : np.ndarray, shape (n_vertices, dimension)
+        Latent coordinates corresponding to graph nodes.
+    vertex_cluster_map : list[int]
+        Cluster assignment for each vertex.
+
     """
+
+    if connectivity_threshold is not None and edge_prob_fn is not None:
+        raise ValueError(
+            "cannot provide both connectivity_threshold and edge_prob_fn"
+        )
+
     if distributions is None:
-        distributions = ['uniform'] * len(cluster_sizes)
-    
+        distributions = ["uniform"] * len(cluster_sizes)
     if dist_params is None:
         dist_params = [{}] * len(cluster_sizes)
-    
-    
-    assert len(distributions) == len(cluster_sizes)
-    assert len(dist_params) == len(cluster_sizes)
-    
+
+    if len(distributions) != len(cluster_sizes) or len(dist_params) != len(cluster_sizes):
+        raise ValueError(
+            "distributions and dist_params must match cluster_sizes in length."
+        )
+
     total_vertices = sum(cluster_sizes)
-    
+
+    # Main loop: retry until connected
     for attempt in range(max_attempts):
-        
-        coordinates_list = []
-        vertex_cluster_map = []  # To track which vertex belongs to which cluster
-        
-        for i, (cluster_size, distribution, params) in enumerate(zip(cluster_sizes, distributions, dist_params)):
-            # For the second cluster, we can add an offset to separate it from the first
-            if i > 0 and 'loc' not in params and distribution == 'normal':
-                params['loc'] = i * 2  # Simple offset for visualization
-            
-            cluster_coords = generate_coordinates(cluster_size, dimension, distribution, **params)
-            coordinates_list.append(cluster_coords)
-            vertex_cluster_map.extend([i] * cluster_size)
-        
-        # Combine all coordinates
-        coordinates = np.vstack(coordinates_list)
-        
-        # Calculate pairwise distances
-        dist_matrix = np.zeros((total_vertices, total_vertices))
+        # 1. Generate latent coordinates cluster‑wise
+        coords_list, vertex_cluster_map = [], []
+        for idx, (size, dist_name, params) in enumerate(
+            zip(cluster_sizes, distributions, dist_params)
+        ):
+            params = params.copy() # goofy ahh
+            if idx > 0 and dist_name == "normal" and "loc" not in params:
+                params["loc"] = idx * 2  
+            cluster_coords = generate_coordinates(size, dimension, dist_name, **params)
+            coords_list.append(cluster_coords)
+            vertex_cluster_map.extend([idx] * size)
+        coordinates = np.vstack(coords_list)
+
+        # 2. Compute pairwise distances (upper triangle only)
+        dist_matrix = np.zeros((total_vertices, total_vertices), dtype=float)
         for i in range(total_vertices):
-            for j in range(i+1, total_vertices):
-                dist = distance_function(
-                    coordinates[i], coordinates[j], 
-                    metric=distance_metric, alpha=distance_alpha
+            for j in range(i + 1, total_vertices):
+                d = distance_function(
+                    coordinates[i],
+                    coordinates[j],
+                    metric=distance_metric,
+                    alpha=distance_alpha,
                 )
-                dist_matrix[i, j] = dist
-                dist_matrix[j, i] = dist
-        
-        # Create graph based on distance threshold
+                dist_matrix[i, j] = dist_matrix[j, i] = d
+
+        # 3. Create edges
         G = nx.Graph()
         G.add_nodes_from(range(total_vertices))
-        
+
+        rng = np.random.default_rng()
         for i in range(total_vertices):
-            for j in range(i+1, total_vertices):
-                if dist_matrix[i, j] <= connectivity_threshold:
-                    G.add_edge(i, j)
-        
-        # Check if the graph is connected
+            for j in range(i + 1, total_vertices):
+                d = dist_matrix[i, j]
+                if edge_prob_fn is not None:
+                    p = float(edge_prob_fn(d))
+                    if p > 0 and rng.random() < p: # if prob is greater than 0 and random number is less than prob
+                        G.add_edge(i, j)
+                else:
+                    if d <= connectivity_threshold:
+                        G.add_edge(i, j)
+
+        # 4. Ensure connectedness
         if nx.is_connected(G):
-            # Add vertex attributes
             for i in range(total_vertices):
-                G.nodes[i]['coords'] = coordinates[i]
-                G.nodes[i]['cluster'] = vertex_cluster_map[i]
-            
+                G.nodes[i]["coords"] = coordinates[i]
+                G.nodes[i]["cluster"] = vertex_cluster_map[i]
             return G, coordinates, vertex_cluster_map
-        
-        print(f"Attempt {attempt+1}: Graph not connected, retrying...")
-    
-    raise RuntimeError(f"Failed to generate a connected graph after {max_attempts} attempts")
+
+    raise RuntimeError(
+        f"Failed to generate a connected graph after {max_attempts} attempts"
+    )
+
 
 def visualize_graph(G, coordinates, vertex_cluster_map):
     """

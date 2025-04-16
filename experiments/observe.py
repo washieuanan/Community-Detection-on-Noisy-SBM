@@ -61,7 +61,7 @@ def sample_observations(G, num_samples, weight_func=None, seed=None):
     candidate_pairs = np.array(candidate_pairs)
     weights = np.array(weights)
     
-    # Normalize weights ?? [should we?] 
+    
     weights = weights / np.sum(weights)
 
 
