@@ -74,7 +74,7 @@ if __name__ == "__main__":
     from generate_graph import generate_latent_geometry_graph, NUM_VERTICES_CLUSTER_1, NUM_VERTICES_CLUSTER_2
     
     cluster_sizes = [NUM_VERTICES_CLUSTER_1, NUM_VERTICES_CLUSTER_2]
-    G, coordinates, vertex_cluster_map = generate_latent_geometry_graph(cluster_sizes)
+    G, coordinates, vertex_cluster_map = generate_latent_geometry_graph(cluster_sizes, connectivity_threshold=0.8)
     
     def weight_func(coord1, coord2):
         distance = get_coordinate_distance(coord1, coord2)

@@ -112,12 +112,26 @@ def generate_coordinates(num_vertices, dimension, distribution='uniform', constr
                 raise ValueError(f"Distribution '{distribution}' not supported for constrained generation")
             
             # Filter candidates to keep only those with norm <= 1:
-            norms = np.linalg.norm(candidates, axis=1)
-            accepted = candidates[norms <= 1]
-            accepted_points.append(accepted)
+            # norms = np.linalg.norm(candidates, axis=1)
+            # accepted = candidates[norms <= 1]
+            # accepted_points.append(accepted)
+
+            accepted_batches = [] 
+            n_accepted = 0 
+
+            while n_accepted < num_vertices:
+                norms = np.linalg.norm(candidates, axis=1)
+                accepted = candidates[norms <= 1] 
+
+                if accepted.size: 
+                    accepted_points.extend(accepted)
+                    n_accepted += accepted.shape[0]
             
-        accepted_points = np.vstack(accepted_points)
-        return accepted_points[:num_vertices]
+            all_pts = np.vstack(accepted_batches)[:num_vertices]
+            return all_pts
+            
+        # accepted_points = np.vstack(accepted_points)
+        # return accepted_points[:num_vertices]
 
 
 def distance_function(point1, point2, metric='euclidean', alpha=1.0):
@@ -150,12 +164,6 @@ def distance_function(point1, point2, metric='euclidean', alpha=1.0):
     else:
         raise ValueError(f"Metric '{metric}' not supported")
 
-import numpy as np
-import networkx as nx
-
-# Assumes `generate_coordinates` and `distance_function` are defined in the same
-# module or imported earlier
-
 
 def generate_latent_geometry_graph(
     cluster_sizes,
@@ -169,7 +177,6 @@ def generate_latent_geometry_graph(
     dist_params=None,
 ):
     """
-    
     Generate a (connected) latent‑geometry graph in :math:`\mathbb R^{d}`.
 
     Parameters
@@ -326,7 +333,7 @@ if __name__ == "__main__":
     cluster_sizes = [NUM_VERTICES_CLUSTER_1, NUM_VERTICES_CLUSTER_2]
     
     # Generate with default uniform distribution
-    G1, coords1, cluster_map1 = generate_latent_geometry_graph(cluster_sizes)
+    G1, coords1, cluster_map1 = generate_latent_geometry_graph(cluster_sizes, connectivity_threshold=0.8)
     visualize_graph(G1, coords1, cluster_map1)
     
     # Generate with different distributions for each cluster
