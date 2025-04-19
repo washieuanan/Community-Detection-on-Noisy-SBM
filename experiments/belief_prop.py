@@ -36,9 +36,8 @@ def initialize_beliefs(G: nx.Graph, q: int, seed=0):
     """initialize beliefs randomly"""
     rng = np.random.default_rng(seed)
     for node in G.nodes():
-        rand_belief = rng.random(q)
-        G.nodes[node]["beliefs"] = rand_belief / rand_belief.sum()
-
+        rand_belief = rng.dirichlet(np.ones(q), size=1)[0]
+        G.nodes[node]["beliefs"] = rand_belief
 
 def calc_beta_param(G: nx.Graph, num_communities: int):
     """calculate beta  param according to Zhang et al. 2014 - spin glass model"""
@@ -58,13 +57,11 @@ def detection_stats(preds, true):
     """calculates basic stats for community detection"""
     num_communities = np.unique(true).size
     true_grouping = {}
-    for comm in range(num_communities):
-        true_grouping[comm] = np.where(true == comm)[0]
-
     pred_grouping = {}
     for comm in range(num_communities):
+        true_grouping[comm] = np.where(true == comm)[0]
         pred_grouping[comm] = np.where(preds == comm)[0]
-
+        
     # get permuation of pred_groupings that most closely matches true_groupings
     perm = np.zeros(num_communities)
     for comm in range(num_communities):
@@ -121,14 +118,11 @@ def belief_propagation(
 
     if beta is None:
         beta = calc_beta_param(G, q) + 1e-3
-
-    messages = {(i, j): rng.random(q) + 1e-3 for i in G for j in G.neighbors(i)}
-
-    for v in messages.values():
-        v /= v.sum()
-
+    
+    messages = {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 for i in G for j in G.neighbors(i)}
+    old_messages = deepcopy(messages)
     for it in range(max_iter):
-        old_messages = deepcopy(messages)
+        old_messages, messages = messages, old_messages
 
         for i in G:
             prod = np.ones(q)
