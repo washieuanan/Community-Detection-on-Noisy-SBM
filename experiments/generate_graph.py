@@ -91,12 +91,11 @@ def generate_coordinates(num_vertices, dimension, distribution='uniform', constr
             raise ValueError(f"Distribution '{distribution}' not supported")
     
     else:
-        # Rejection sampling: generate candidates until we have enough that lie within the unit sphere.
-        accepted_points = []
-        batch_size = max(100, num_vertices)  
-        
-        while len(accepted_points) < num_vertices:
-            
+        points = []
+        batch_size = max(100, num_vertices)
+
+        while len(points) < num_vertices:
+            # 1) sample a batch
             if distribution == 'uniform':
                 low = kwargs.get('low', 0)
                 high = kwargs.get('high', 1)
@@ -109,29 +108,18 @@ def generate_coordinates(num_vertices, dimension, distribution='uniform', constr
                 scale = kwargs.get('scale', 1)
                 candidates = np.random.exponential(scale, size=(batch_size, dimension))
             else:
-                raise ValueError(f"Distribution '{distribution}' not supported for constrained generation")
-            
-            # Filter candidates to keep only those with norm <= 1:
-            # norms = np.linalg.norm(candidates, axis=1)
-            # accepted = candidates[norms <= 1]
-            # accepted_points.append(accepted)
+                raise ValueError(f"Distribution '{distribution}' not supported")
 
-            accepted_batches = [] 
-            n_accepted = 0 
+            norms = np.linalg.norm(candidates, axis=1)
+            accepted = candidates[norms <= 1]
+            if accepted.size:
+                points.extend(accepted.tolist())
 
-            while n_accepted < num_vertices:
-                norms = np.linalg.norm(candidates, axis=1)
-                accepted = candidates[norms <= 1] 
-
-                if accepted.size: 
-                    accepted_points.extend(accepted)
-                    n_accepted += accepted.shape[0]
+        
+        points = np.array(points)[:num_vertices]
+        return points
             
-            all_pts = np.vstack(accepted_batches)[:num_vertices]
-            return all_pts
-            
-        # accepted_points = np.vstack(accepted_points)
-        # return accepted_points[:num_vertices]
+    
 
 
 def distance_function(point1, point2, metric='euclidean', alpha=1.0):
@@ -337,14 +325,14 @@ if __name__ == "__main__":
     visualize_graph(G1, coords1, cluster_map1)
     
     # Generate with different distributions for each cluster
-    distributions = ['uniform', 'uniform']
+    distributions = ['normal', 'normal']
     dist_params = [
-        {'low': -1, 'high': 1},
-        {'low': -1, 'high': 1}
+        {'loc':-0.5, 'scale':0.3, 'constrain_to_unit_sphere':True},
+        {'loc':0.5, 'scale':0.4, 'constrain_to_unit_sphere':True}
     ]
     
     G2, coords2, cluster_map2 = generate_latent_geometry_graph(
-        cluster_sizes, 
+        [100, 150], 
         distributions=distributions,
         dist_params=dist_params,
         connectivity_threshold=0.8  # Higher threshold to create more edges
