@@ -10,11 +10,6 @@ def get_coordinate_distance(coord1, coord2):
 
 def sample_observations(G, num_samples, weight_func=None, seed=None):
     """
-
-    thanks chat for the doc string 
-
-
-
     Sample observations from graph G. Each observation is a tuple (x, y)
     indicating that there exists a path between vertex x and vertex y.
     
@@ -33,6 +28,8 @@ def sample_observations(G, num_samples, weight_func=None, seed=None):
     Returns:
       observations : list of tuple(int, int)
           List of vertex pairs (observations) such that there exists a path between them.
+      vertex_coords : dict
+          Dictionary mapping vertex IDs to their coordinates.
     """
     if seed is not None:
         np.random.seed(seed)
@@ -68,7 +65,10 @@ def sample_observations(G, num_samples, weight_func=None, seed=None):
     chosen_indices = np.random.choice(len(candidate_pairs), size=num_samples, replace=True, p=weights)
     observations = candidate_pairs[chosen_indices].tolist()
 
-    return observations
+    # Get all vertices and their coordinates
+    vertex_coords = {node: G.nodes[node].get('coords') for node in G.nodes()}
+    
+    return observations, vertex_coords
 
 if __name__ == "__main__":
     from generate_graph import generate_latent_geometry_graph, NUM_VERTICES_CLUSTER_1, NUM_VERTICES_CLUSTER_2
@@ -80,5 +80,8 @@ if __name__ == "__main__":
         distance = get_coordinate_distance(coord1, coord2)
         return np.exp(-0.5 * distance)
     
-    observations = sample_observations(G, 10, weight_func=weight_func)
+    observations, vertex_coords = sample_observations(G, 10, weight_func=weight_func)
+    print("Observations:")
     print(observations)
+    print("\nVertices and their coordinates:")
+    print(vertex_coords)
