@@ -72,7 +72,7 @@ def calc_beta_param(G: nx.Graph, num_communities: int):
             community_balance_factor = 0.9
     
     beta = base_beta * density_factor * community_balance_factor
-    return max(0.5, min(5.0, beta))  # Keep beta in reasonable range
+    return max(1.0, min(5.0, beta))  # Keep beta in reasonable range
 
 
 def get_true_communities(G: nx.Graph):
@@ -137,10 +137,11 @@ def belief_propagation(
     balance_regularization: float = 0.1,  # Community balance regularization
     degen_threshold: float = 0.9,  # Lower threshold to detect degeneration earlier
     seed: int = 0,
+    min_steps: int = 0,
 ):
     """
     Belief propagation from Zhang et. al. 2014
-    
+    danke chatgpt
     Parameters:
     ----------
     G : nx.Graph
@@ -160,6 +161,7 @@ def belief_propagation(
     seed : int
         Random seed
     """
+    np.random.seed(seed)
     rng = np.random.default_rng(seed)
     m = G.number_of_edges()
     deg = dict(G.degree())
@@ -231,17 +233,16 @@ def belief_propagation(
         )
         convergence_history.append(delta)
                
-        if delta < tol:
+        if delta < tol and it > min_steps:
             community_entropy = -np.sum(community_sizes * np.log(community_sizes + 1e-10))
             ideal_entropy = -np.log(1/q)
             entropy_ratio = community_entropy / ideal_entropy
             
-            if entropy_ratio > 0.8: 
+            if entropy_ratio > 0.7: 
                 print(f"BP converged in {it+1} iterations, entropy ratio: {entropy_ratio:.3f}")
                 break
             else:
                 if it > anneal_steps:
-                    print(f"Low entropy ratio ({entropy_ratio:.3f}), continuing search...")
                     inv_sizes = 1.0 / (community_sizes + 1e-10)
                     inv_sizes = inv_sizes / np.sum(inv_sizes)
                     for edge in messages:
@@ -261,7 +262,6 @@ def belief_propagation(
     
     print(f"Final beta: {beta}")
     print(f"Final community proportions: {community_sizes}")
-    print(f"Entropy ratio: {entropy_ratio:.4f} (1.0 is perfectly balanced)")
     
 if __name__ == "__main__":
     num_nodes = 100
