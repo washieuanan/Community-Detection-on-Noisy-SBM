@@ -19,6 +19,8 @@ import numpy as np
 import networkx as nx
 
 from random_walk_obs import random_walk_observations
+from sensor_observe import sensor_observations
+
 def create_observed_subgraph(num_coords, observations):
     """
     create subgraph containing all nodes and observed paths as edges
@@ -56,7 +58,19 @@ if __name__ == "__main__":
         edge_prob_fn= prob_weight_func # Higher threshold to create more edges
     )  
     # observations, _ = sample_observations(G2, 25, weight_func=weight_func)
-    observations = random_walk_observations(G2, num_walkers=8, stopping_param=0.2, leaky=0.1)
+    # observations = random_walk_observations(G2, num_walkers=8, stopping_param=0.2, leaky=0.1)
+    r_grid = np.linspace(0.1, 1.0, 10)
+
+    obs, first_seen = sensor_observations(
+        G2, sensor=0, radii=r_grid, seed=123, deduplicate_edges=True
+    )
+    
+    observations = []
+    for k, v in obs.items():
+        for e in v:
+            observations.append(e)
+    # print(observations)
+    
     observed_nodes = set()
     for u, v in observations:
         observed_nodes.add(u)
@@ -70,9 +84,9 @@ if __name__ == "__main__":
         subG, 
         3, 
         max_iter=1000,
-        damping=0.4,
+        damping=0.3,
         anneal_steps=100,    
-        balance_regularization=0.02,
+        balance_regularization=0.1,
         min_steps=50,
     )
     marginals, preds = get_marginals_and_preds(subG)
