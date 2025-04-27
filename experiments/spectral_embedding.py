@@ -25,20 +25,20 @@ def spectral_embedding_clustering(G, observations, k):
     dict
         Mapping node -> community label in {0,1,...,k-1}.
     """
-    # Build a graph H containing only your observed edges, but with the same node set as G so isolated nodes are included.
+    # Build a graph H containing only edges from observation
     H = nx.Graph()
     H.add_nodes_from(G.nodes())
     H.add_edges_from(observations)
 
-    # Get the (normalized) Laplacian matrix as a sparse SciPy array, with rows/cols in the order of G.nodes().
+    # Get the Laplacian matrix as a sparse array, with rows/cols in the order of G.nodes
     nodes = list(G.nodes())
     A = nx.to_scipy_sparse_array(H, nodelist=nodes, format="csr")
     L = csgraph.laplacian(A, normed=True)
 
-    # Compute the first k+1 eigenpairs of L (we skip the 0-th eigenvector which is constant)
+    # Compute the first k+1 eigenpairs of L 
     _, vecs = np.linalg.eigh(L.toarray())
 
-    # Take the eigenvectors 1..k (columns 1 through k)
+    # Take the eigenvectors 1 ... k 
     X = vecs[:, 1 : k + 1]  # shape = (n_nodes, k)
 
     # Cluster rows of X with k-means
@@ -46,7 +46,7 @@ def spectral_embedding_clustering(G, observations, k):
     km.fit(X)
     labels = km.labels_
 
-    # Build the mapping back to the original node IDs
+
     return {node: int(labels[i]) for i, node in enumerate(nodes)}
 
 
