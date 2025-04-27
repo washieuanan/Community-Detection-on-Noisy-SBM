@@ -3,9 +3,9 @@ import numpy as np
 from scipy.sparse import csgraph
 from sklearn.cluster import KMeans
 
-from generate_graph import generate_latent_geometry_graph
-from random_walk_obs import random_walk_observations
-from observe import get_coordinate_distance
+from graph_generation.generate_graph import generate_latent_geometry_graph
+from observations.random_walk_obs import random_walk_observations
+from observations.observe import get_coordinate_distance
 
 def spectral_embedding_clustering(G, observations, k):
     """
