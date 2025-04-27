@@ -20,7 +20,40 @@ def default_prob_fn(r: float, *, r_max: float, kind: str = "exp") -> float:
         return float(np.exp(-3.0 * r))
     raise ValueError("kind must be 'linear' or 'exp'")
 
+def pick_sensors(G, num_sensors, min_sep=0.15, *, seed=None):
+    ''' 
+    shuffle through vertex ids to randomize order 
+    walk through the shuffled list and add a vertex to sensor set S if its euclidean distance from all vertices in S is leq min_sep 
+    stop when we have num_sensors sensors 
 
+    G: nx.Graph
+    num_sensors: int
+    min_sep: float
+    seed: int | None
+
+    Returns
+    -------
+    sensors: list[int]
+    '''
+    rng  = np.random.default_rng(seed)
+    ids  = np.array(G.nodes())
+    rng.shuffle(ids)
+
+    coords = {v: np.asarray(G.nodes[v]["coords"], float) for v in ids}
+    sensors = []
+
+    for v in ids:
+        if len(sensors) == num_sensors:
+            break
+        if all(np.linalg.norm(coords[v] - coords[w]) >= min_sep for w in sensors):
+            sensors.append(v)
+
+    if len(sensors) < num_sensors:
+        raise RuntimeError(
+            f"Could place only {len(sensors)}/{num_sensors} sensors "
+            f"with min-sep={min_sep}.  Lower min_sep or nudge num_sensors."
+        )
+    return sensors
 
 def sensor_observations(
     G: nx.Graph,
@@ -44,7 +77,7 @@ def sensor_observations(
     Returns
     -------
     obs_by_r    : {radius: [[u,v], …]}  edges observed at each radius
-    first_seen  : {vertex: first_radius_reachable}
+    first_seen  : {vertex: first_radius_reachable} when the vertex was first detected by the sensor 
     """
     radii = np.sort(np.asarray(radii, dtype=float))
     if radii[0] <= 0 or radii[-1] > 1:
@@ -107,17 +140,64 @@ def sensor_observations(
     return obs_by_r, first_seen
 
 
+def gather_multi_sensor_observations(G, sensors, radii, *, prob_fn=None, seed=None, deduplicate_edges=False):
+    obs_global = {r: [] for r in radii}
+    first_seen = {}
+
+    master_rng = np.random.default_rng(seed)
+    for s in sensors:
+        # split seed stream so each sensor gets an ind RNG
+        s_seed = master_rng.integers(2**63 - 1)
+        obs_s, fs_s = sensor_observations(
+            G, s, radii,
+            prob_fn=prob_fn,
+            seed=int(s_seed),
+            deduplicate_edges=deduplicate_edges,
+        )
+
+        for r in radii:
+            obs_global[r].extend(obs_s[r])
+
+        # keep earliest first-seen radius per vertex
+        for v, r0 in fs_s.items():
+            first_seen[v] = min(first_seen.get(v, 1e9), r0)
+
+    if deduplicate_edges:
+        for r in radii:
+            obs_global[r] = [list(e) for e in {tuple(sorted(e))
+                                               for e in obs_global[r]}]
+
+    return obs_global, first_seen
+
+
 
 if __name__ == "__main__":
-    from generate_graph import generate_latent_geometry_graph
+    from graph_generation.generate_graph import generate_latent_geometry_graph
 
-    G, coords, _ = generate_latent_geometry_graph([30, 40],
-                                                  connectivity_threshold=0.75)
-    r_grid = np.linspace(0.1, 1.0, 10)
-    obs, first_seen = sensor_observations(
-        G, sensor=0, radii=r_grid, seed=123, deduplicate_edges=True
-    )
+    # G, coords, _ = generate_latent_geometry_graph([30, 40],
+    #                                               connectivity_threshold=0.75)
+    # r_grid = np.linspace(0.1, 1.0, 10)
+    # obs, first_seen = sensor_observations(
+    #     G, sensor=0, radii=r_grid, seed=123, deduplicate_edges=True
+    # )
+
+    # print(obs)
+    # for r in r_grid:
+    #     print(f"r={r:.2f}  edges={len(obs[r])}")
+
+
+   
+    G, coords, _ = generate_latent_geometry_graph([100,150], connectivity_threshold=0.75)
+
+    sensors = pick_sensors(G, num_sensors=3, min_sep=0.18, seed=7)
+
+    r_grid = np.linspace(0.1, 1.0, 12)
+    obs, first_seen = gather_multi_sensor_observations(
+            G, sensors, r_grid, seed=99, deduplicate_edges=True)
 
     print(obs)
+    print("total len of obs: ", len(obs))
+    print("anchors:", sensors)
+    print("total edges in G:", len(G.edges))
     for r in r_grid:
-        print(f"r={r:.2f}  edges={len(obs[r])}")
+        print(f"r={r:.2f}   edges_seen={len(obs[r])}")
