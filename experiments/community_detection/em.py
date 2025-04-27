@@ -6,9 +6,9 @@ from scipy.sparse.csgraph import laplacian
 from sklearn.cluster import KMeans
 
 
-from generate_graph import generate_latent_geometry_graph
-from random_walk_obs import random_walk_observations
-from observe import sample_observations, get_coordinate_distance
+from graph_generation.generate_graph import generate_latent_geometry_graph
+from observations.random_walk_obs import random_walk_observations
+from observations.observe import sample_observations, get_coordinate_distance
 
 
 def initialize_latent(G, dim):
