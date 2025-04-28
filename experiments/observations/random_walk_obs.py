@@ -1,5 +1,8 @@
+from typing import List, Tuple, Optional, Any
 import networkx as nx
 import numpy as np
+
+from .observe import Observation
 
 def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0):
     """
@@ -51,8 +54,75 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
 
     return observations
 
+class RandomWalkObservation(Observation):
+    """
+    Perform observations by spawning a number of Metropolis–Hastings random walkers.
+    """
+
+    def __init__(
+        self,
+        graph: nx.Graph,
+        seed: int,
+        num_walkers: int,
+        num_steps: int = 5,
+        stopping_param: Optional[float] = None,
+        leaky: float = 0.0,
+    ):
+        """
+        Parameters
+        ----------
+        graph : nx.Graph
+        seed : int
+        num_walkers : int
+            How many independent walkers to launch.
+        num_steps : int
+            Fixed number of steps per walker (unless stopping_param is set).
+        stopping_param : float or None
+            If not None, we sample each walk’s length ~ Geometric(stopping_param).
+        leaky : float in [0,1]
+            Probability a walker fails to record any given edge.
+        """
+        super().__init__(graph, seed)
+        self.num_walkers = num_walkers
+        self.num_steps = num_steps
+        self.stopping_param = stopping_param
+        self.leaky = leaky
+
+    def observe(self) -> List[Tuple[Any, Any]]:
+        # draw an independent seed for the global numpy RNG inside random_walk_observations
+        rw_seed = int(self.rng.integers(2**32 - 1))
+        raw_obs = random_walk_observations(
+            G=self.graph,
+            num_walkers=self.num_walkers,
+            num_steps=self.num_steps,
+            stopping_param=self.stopping_param,
+            leaky=self.leaky,
+            seed=rw_seed,
+        )
+        # convert inner lists to tuples
+        self.observations = [tuple(edge) for edge in raw_obs]
+        return self.observations
+
 if __name__ == "__main__":
     # Example usage
-    G = nx.erdos_renyi_graph(100, 0.05)
-    observations = random_walk_observations(G, num_walkers=10, num_steps=5, stopping_param = 0.1, leaky=0.1)
-    print(observations)
+    # G = nx.erdos_renyi_graph(100, 0.05)
+    # observations_ = random_walk_observations(G, num_walkers=10, num_steps=5, stopping_param = 0.1, leaky=0.1)
+    # print(observations_)
+
+    from graph_generation.generate_graph import generate_latent_geometry_graph
+    G, coords, _ = generate_latent_geometry_graph([50,50], connectivity_threshold=0.8)
+
+    # instantiate
+    rw = RandomWalkObservation(
+        graph=G,
+        seed=123,
+        num_walkers=10,
+        num_steps=5,
+        stopping_param=0.1,
+        leaky=0.1,
+    )
+
+    # get your random-walk edges
+    edges = rw.observe()
+    print(f"Observed {len(edges)} edges via random walks")
+    print("Observed the following edges: ", edges)
