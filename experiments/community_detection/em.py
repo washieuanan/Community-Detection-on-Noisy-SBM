@@ -1,3 +1,5 @@
+from typing import List, Tuple, Any, Optional
+
 import numpy as np
 import networkx as nx
 from scipy.special import expit  
@@ -5,9 +7,11 @@ from numpy.linalg import norm
 from scipy.sparse.csgraph import laplacian
 from sklearn.cluster import KMeans
 
-from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
-from experiments.observations.random_walk_obs import random_walk_observations
-from experiments.observations.observe import sample_observations, get_coordinate_distance
+#pylint: disable=unused-import, redefined-outer-name
+from graph_generation.generate_graph import generate_latent_geometry_graph
+from observations.random_walk_obs import random_walk_observations
+from observations.standard_observe import get_coordinate_distance
+from .detect import Detection
 
 
 def initialize_latent(G, dim):
@@ -157,6 +161,38 @@ def latent_space_em(G, observations, K, dim=2, max_iter=20):
         'nodes': nodes, 'X': X, 'q': q, 'pi': pi,
         'mu': mu, 'kappa': kappa, 'beta': beta, 'beta0': beta0
     }
+
+class LatentSpaceEMDetection(Detection):
+    """
+    EM detection using the latent-space model.
+    """
+    def __init__(
+        self,
+        graph: nx.Graph,
+        observations: List[Tuple[Any, Any]],
+        K: int,
+        dim: int = 2,
+        max_iter: int = 20
+    ):
+        super().__init__(graph, observations)
+        self.K = K
+        self.dim = dim
+        self.max_iter = max_iter
+
+    def output(self) -> np.ndarray:
+        """
+        Perform EM and return hard community labels.
+        """
+        results = latent_space_em(
+            self.graph,
+            self.observations,
+            self.K,
+            dim=self.dim,
+            max_iter=self.max_iter
+        )
+        q = results['q']
+        labels = np.argmax(q, axis=1)
+        return labels
 
 def detection_stats(preds, true):
     """

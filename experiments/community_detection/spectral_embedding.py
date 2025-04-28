@@ -1,12 +1,18 @@
+
+from typing import List, Tuple, Any
+
 import networkx as nx
 import numpy as np
 from scipy.sparse import csgraph
 from sklearn.cluster import KMeans
 
-from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
-from experiments.observations.random_walk_obs import random_walk_observations
-from experiments.observations.observe import get_coordinate_distance
+from graph_generation.generate_graph import generate_latent_geometry_graph
+from observations.random_walk_obs import random_walk_observations
+from observations.standard_observe import get_coordinate_distance
+from .detect import Detection
 
+
+#pylint: disable=redefined-outer-name
 def spectral_embedding_clustering(G, observations, k):
     """
     Spectral embedding + k-means clustering on observed edges.
@@ -48,6 +54,45 @@ def spectral_embedding_clustering(G, observations, k):
 
 
     return {node: int(labels[i]) for i, node in enumerate(nodes)}
+
+
+class SpectralEmbeddingDetection(Detection):
+    """
+    Detection via spectral embedding + k-means.
+
+    Parameters
+    ----------
+    graph : nx.Graph
+        The full vertex set.
+    observations : List[Tuple[Any, Any]]
+        Observed edges.
+    k : int
+        Number of clusters.
+    """
+    def __init__(
+        self,
+        graph: nx.Graph,
+        observations: List[Tuple[Any, Any]],
+        k: int
+    ):
+        super().__init__(graph, observations)
+        self.k = k
+
+    def output(self) -> np.ndarray:
+        """
+        Run spectral embedding and return hard labels.
+
+        Returns
+        -------
+        labels : np.ndarray, shape (n_nodes,)
+            Community assignment for each node, in the order of the graph's nodes.
+        """
+        return spectral_embedding_clustering(
+            self.graph,
+            self.observations,
+            self.k
+        )
+
 
 
 def detection_stats(preds, true):
