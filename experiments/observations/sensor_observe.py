@@ -1,23 +1,26 @@
 from __future__ import annotations
+from typing import Callable, Dict, List, Sequence, Tuple, Any
 import numpy as np
 import networkx as nx
-from typing import Callable, Dict, List, Sequence, Tuple
+
+
+from .observe import Observation
 
 
 def euclid_dist(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(a - b, ord=2))
 
 
-def default_prob_fn(r: float, *, r_max: float, kind: str = "exp") -> float:
+def default_prob_fn(rad: float, *, r_max: float, kind: str = "exp") -> float:
     """
     Monotone detection-probability profile.
         kind="linear": p(r)=max(0,1−r/r_max)
         kind="exp":    p(r)=exp(−λ r) with λ=3
     """
     if kind == "linear":
-        return max(0.0, 1.0 - r / r_max)
+        return max(0.0, 1.0 - rad / r_max)
     if kind == "exp":
-        return float(np.exp(-3.0 * r))
+        return float(np.exp(-3.0 * rad))
     raise ValueError("kind must be 'linear' or 'exp'")
 
 def pick_sensors(G, num_sensors, min_sep=0.15, *, seed=None):
@@ -170,7 +173,100 @@ def gather_multi_sensor_observations(G, sensors, radii, *, prob_fn=None, seed=No
     return obs_global, first_seen
 
 
+class SingleSensorObservation(Observation):
+    """
+    Perform observations from a single sensor node, across a list of radii.
+    """
 
+    def __init__(
+        self,
+        graph: nx.Graph,
+        seed: int,
+        sensor: int,
+        radii: Sequence[float],
+        prob_fn: Callable[[float], float] | None = None,
+        deduplicate_edges: bool = False,
+    ):
+        super().__init__(graph, seed)
+        self.sensor = sensor
+        self.radii = radii
+        self.prob_fn = prob_fn
+        self.deduplicate_edges = deduplicate_edges
+
+    def observe(self) -> List[Tuple[Any, Any]]:
+        # draw a fresh seed for the internal sensor routine
+        s_seed = int(self.rng.integers(2**63 - 1))
+        obs_by_r, _ = sensor_observations(
+            self.graph,
+            sensor=self.sensor,
+            radii=self.radii,
+            prob_fn=self.prob_fn,
+            seed=s_seed,
+            deduplicate_edges=self.deduplicate_edges,
+        )
+
+        # flatten out all the (u,v) pairs across radii
+        self.observations = []
+        for radi in self.radii:
+            for u, v in obs_by_r[radi]:
+                self.observations.append((u, v))
+
+        return self.observations
+
+
+class MultiSensorObservation(Observation):
+    """
+    Perform observations from multiple sensors chosen automatically, 
+    then aggregate all edges seen by any sensor.
+    """
+
+    def __init__(
+        self,
+        graph: nx.Graph,
+        seed: int,
+        num_sensors: int,
+        radii: Sequence[float],
+        min_sep: float = 0.15,
+        prob_fn: Callable[[float], float] | None = None,
+        deduplicate_edges: bool = False,
+    ):
+        super().__init__(graph, seed)
+        self.num_sensors = num_sensors
+        self.radii = radii
+        self.min_sep = min_sep
+        self.prob_fn = prob_fn
+        self.deduplicate_edges = deduplicate_edges
+        self.sensors: List[int] = []
+
+    def observe(self) -> List[Tuple[Any, Any]]:
+        # pick sensors once
+        pick_seed = int(self.rng.integers(2**63 - 1))
+        self.sensors = pick_sensors(
+            self.graph,
+            num_sensors=self.num_sensors,
+            min_sep=self.min_sep,
+            seed=pick_seed,
+        )
+
+        # gather and flatten
+        gather_seed = int(self.rng.integers(2**63 - 1))
+        obs_global, _ = gather_multi_sensor_observations(
+            self.graph,
+            sensors=self.sensors,
+            radii=self.radii,
+            prob_fn=self.prob_fn,
+            seed=gather_seed,
+            deduplicate_edges=self.deduplicate_edges,
+        )
+
+        observations = []
+        for radi in self.radii:
+            for u, v in obs_global[radi]:
+                observations.append((u, v))
+
+        self.observations = observations
+        return self.observations
+    
 if __name__ == "__main__":
     from graph_generation.generate_graph import generate_latent_geometry_graph
 
@@ -189,15 +285,24 @@ if __name__ == "__main__":
    
     G, coords, _ = generate_latent_geometry_graph([100,150], connectivity_threshold=0.75)
 
-    sensors = pick_sensors(G, num_sensors=3, min_sep=0.18, seed=7)
+    single = SingleSensorObservation(G, seed=42, sensor=0, radii=np.linspace(0.1,1.0,10))
+    edges1 = single.observe()
+    print("Edges 1:", edges1)
 
-    r_grid = np.linspace(0.1, 1.0, 12)
-    obs, first_seen = gather_multi_sensor_observations(
-            G, sensors, r_grid, seed=99, deduplicate_edges=True)
+    # Multi-sensor:
+    multi = MultiSensorObservation(G, seed=42, num_sensors=3, radii=np.linspace(0.1,1.0,10))
+    edges2 = multi.observe()
+    print("Edges 2:", edges2)
 
-    print(obs)
-    print("total len of obs: ", len(obs))
-    print("anchors:", sensors)
-    print("total edges in G:", len(G.edges))
-    for r in r_grid:
-        print(f"r={r:.2f}   edges_seen={len(obs[r])}")
+    # sensors = pick_sensors(G, num_sensors=3, min_sep=0.18, seed=7)
+
+    # r_grid = np.linspace(0.1, 1.0, 12)
+    # obs, first_seen = gather_multi_sensor_observations(
+    #         G, sensors, r_grid, seed=99, deduplicate_edges=True)
+
+    # print(obs)
+    # print("total len of obs: ", len(obs))
+    # print("anchors:", sensors)
+    # print("total edges in G:", len(G.edges))
+    # for r in r_grid:
+    #     print(f"r={r:.2f}   edges_seen={len(obs[r])}")
