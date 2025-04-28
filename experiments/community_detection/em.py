@@ -5,10 +5,9 @@ from numpy.linalg import norm
 from scipy.sparse.csgraph import laplacian
 from sklearn.cluster import KMeans
 
-
-from graph_generation.generate_graph import generate_latent_geometry_graph
-from observations.random_walk_obs import random_walk_observations
-from observations.observe import sample_observations, get_coordinate_distance
+from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
+from experiments.observations.random_walk_obs import random_walk_observations
+from experiments.observations.observe import sample_observations, get_coordinate_distance
 
 
 def initialize_latent(G, dim):
@@ -137,7 +136,13 @@ def latent_space_em(G, observations, K, dim=2, max_iter=20):
     -------
     dict with final 'X', 'q', 'pi', 'mu', 'kappa', 'beta', 'beta0'
     """
-    nodes, X, q, pi, mu, kappa, beta, beta0 = initialize_params(G, observations, K, dim)
+    # create observed subgraph
+    G_obs = nx.Graph()
+    for n in G.nodes():
+        G_obs.add_node(n)
+    for u, v in observations:
+        G_obs.add_edge(u, v)
+    nodes, X, q, pi, mu, kappa, beta, beta0 = initialize_params(G_obs, observations, K, dim)
     for it in range(max_iter):
         # E-step
         q = e_step(X, mu, kappa, pi)
@@ -152,8 +157,6 @@ def latent_space_em(G, observations, K, dim=2, max_iter=20):
         'nodes': nodes, 'X': X, 'q': q, 'pi': pi,
         'mu': mu, 'kappa': kappa, 'beta': beta, 'beta0': beta0
     }
-
-
 
 def detection_stats(preds, true):
     """
@@ -223,31 +226,41 @@ def eval_em_accuracy(nodes, q, G):
     # Hard assignments via max responsibility
     preds = np.argmax(q, axis=1)
 
-    true = np.array([G.nodes[n]['cluster'] for n in nodes], dtype=int)
+    true = np.array([G.nodes[n]['comm'] for n in nodes], dtype=int)
     return detection_stats(preds, true)
 
 
 if __name__ == "__main__":
-    distributions = ['normal', 'normal', 'normal']
-    dist_params = [
-        {'loc':[-0.3, 0.1, 0.3], 'scale':0.2, 'constrain_to_unit_sphere':True},
-        {'loc':[0.1, 0.4, -0.2], 'scale':0.1, 'constrain_to_unit_sphere':True},
-        {'loc':[0.3, -0.1, 0.1], 'scale':0.2, 'constrain_to_unit_sphere':True},
-    ]
+    from experiments.graph_generation.gbm import generate_gbm
+    # distributions = ['normal', 'normal', 'normal']
+    # dist_params = [
+    #     {'loc':[-0.3, 0.1, 0.3], 'scale':0.2, 'constrain_to_unit_sphere':True},
+    #     {'loc':[0.1, 0.4, -0.2], 'scale':0.1, 'constrain_to_unit_sphere':True},
+    #     {'loc':[0.3, -0.1, 0.1], 'scale':0.2, 'constrain_to_unit_sphere':True},
+    # ]
     
-    def weight_func(coord1, coord2):
-        distance = get_coordinate_distance(coord1, coord2)
-        return np.exp(-0.4 * distance)
+    # def weight_func(coord1, coord2):
+    #     distance = get_coordinate_distance(coord1, coord2)
+    #     return np.exp(-0.4 * distance)
     
-    def prob_weight_func(dist):
-        return max(np.exp(-0.6 * dist), 0.1)
+    # def prob_weight_func(dist):
+    #     return max(np.exp(-0.6 * dist), 0.1)
     
-    G2, coords2, cluster_map2 = generate_latent_geometry_graph(
-        [40, 40, 40], 
-        distributions=distributions,
-        dist_params=dist_params,
-        edge_prob_fn= prob_weight_func # Higher threshold to create more edges
-    )  
+    # G2, coords2, cluster_map2 = generate_latent_geometry_graph(
+    #     [40, 40, 40], 
+    #     distributions=distributions,
+    #     dist_params=dist_params,
+    #     edge_prob_fn= prob_weight_func # Higher threshold to create more edges
+    # )  
+    G2 = generate_gbm(
+        n=300,
+        K=3,
+        r_in=0.25,
+        r_out=0.05,
+        p_in=0.9,
+        p_out=0.2,
+        seed=123
+    )
 
     observations = random_walk_observations(G2, num_walkers=8, stopping_param=0.2, leaky=0.1)
 

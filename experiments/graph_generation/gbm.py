@@ -2,6 +2,10 @@ import numpy as np
 import networkx as nx 
 import matplotlib.pyplot as plt 
 
+def discard_disconnected_nodes(G):
+    """remove all nodes in G that have zero edges"""
+    disconnected_nodes = [node for node in G.nodes() if G.degree(node) == 0]
+    G.remove_nodes_from(disconnected_nodes)
 
 def generate_gbm(n: int, 
                  K: int,
@@ -52,7 +56,7 @@ def generate_gbm(n: int,
     comm = rng.integers(0, K, size = n) 
     G = nx.Graph() 
     for idx in range(n): 
-        G.add_node(idx, pos=tuple(pts[idx]), comm=int(comm[idx])) 
+        G.add_node(idx, coords=tuple(pts[idx]), comm=int(comm[idx])) 
 
     for i in range(n): 
         for j in range(i + 1, n): 
@@ -63,6 +67,7 @@ def generate_gbm(n: int,
                 else: 
                     if d < r_out and rng.random() < p_out: 
                         G.add_edge(i,j) 
+    # discard_disconnected_nodes(G)
     return G
 
 def generate_gbm_soft_threshold(n: int, 
@@ -84,7 +89,7 @@ def generate_gbm_soft_threshold(n: int,
     comm = rng.integers(0, K, size = n) 
     G = nx.Graph() 
     for u in range(n): 
-        G.add_node(u, pos=tuple(pts[u]), comm=int(comm[u]))
+        G.add_node(u, coords=tuple(pts[u]), comm=int(comm[u]))
 
     for u in range(n): 
         for v in range(u + 1, n): 
@@ -93,6 +98,7 @@ def generate_gbm_soft_threshold(n: int,
 
             if rng.random() < np.clip(p, 0, 1): 
                 G.add_edge(u,v) 
+    # discard_disconnected_nodes(G)
     return G 
 # CHAT
 def plot_gbm(
@@ -127,7 +133,7 @@ def plot_gbm(
         Whether to draw node labels.
     """
     # Extract positions
-    pos = nx.get_node_attributes(G, 'pos')
+    pos = nx.get_node_attributes(G, 'coords')
     # Extract community labels
     comm = nx.get_node_attributes(G, 'comm')
     # Unique communities
@@ -184,12 +190,21 @@ if __name__ == "__main__":
     Q = [[0.8, 0.2],
         [0.2, 0.8]]
 
-    G = generate_gbm_soft_threshold(
-        n=300,
+    # G = generate_gbm_soft_threshold(
+    #     n=500,
+    #     K=2,
+    #     Q=np.array(Q),
+    #     kernel=lambda d: gaussian_kernel(d, sigma=0.2),
+    #     seed=2025
+    # )
+    G = generate_gbm(
+        n=500,
         K=2,
-        Q=np.array(Q),
-        kernel=lambda d: gaussian_kernel(d, sigma=0.2),
-        seed=2025
+        r_in=0.2,
+        r_out=0.1,
+        p_in=0.9,
+        p_out=0.1,
+        seed=123
     )
 
     plot_gbm(G, node_size = 30, edge_alpha= 0.3)
