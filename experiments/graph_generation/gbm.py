@@ -7,12 +7,10 @@ def discard_disconnected_nodes(G):
     disconnected_nodes = [node for node in G.nodes() if G.degree(node) == 0]
     G.remove_nodes_from(disconnected_nodes)
 
-def generate_gbm(n: int, 
+def generate_gbm(n: int,
                  K: int,
-                 r_in: float, 
-                 r_out: float, 
-                 p_in: float,
-                 p_out: float, 
+                 a: int, 
+                 b: int,
                  seed: int | None):
 
     '''
@@ -28,6 +26,15 @@ def generate_gbm(n: int,
     p_out (float: edge probability for pairs in different communities and dist < r_0ut
     seed (int or None): Random seed for reproducability 
     '''
+
+    if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
+        raise ValueError("Pick a and b s.t. sqrt(a) - sqrt(b) > 2 * sqrt(2)")
+
+    r_in = a * np.log(n) / n
+    r_out = b * np.log(n) / n
+    p_in = a * np.log(n) / n
+    p_out = b * np.log(n) / n
+
 
     rng = np.random.default_rng(seed) # not used
     pts = np.empty((n, 2)) 
@@ -167,6 +174,7 @@ def plot_gbm(
 
 
 
+
 if __name__ == "__main__": 
     # G = generate_gbm(
     #     n=300,
@@ -200,11 +208,10 @@ if __name__ == "__main__":
     G = generate_gbm(
         n=500,
         K=2,
-        r_in=0.2,
-        r_out=0.1,
-        p_in=0.9,
-        p_out=0.1,
+        a = 100, 
+        b = 50,
         seed=123
     )
 
+    
     plot_gbm(G, node_size = 30, edge_alpha= 0.3)

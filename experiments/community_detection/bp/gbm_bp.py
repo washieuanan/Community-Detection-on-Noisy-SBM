@@ -133,9 +133,9 @@ if __name__ == "__main__":
     belief_propagation(
         subG, 
         q=3, 
-        max_iter=1000,
+        max_iter=1000, # 
         damping=0.2,
-        anneal_steps=150,    
+        anneal_steps=150,     
         balance_regularization=0.1,
         min_steps=50,
     )

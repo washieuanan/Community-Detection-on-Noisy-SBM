@@ -116,10 +116,10 @@ if __name__ == "__main__":
     rw = RandomWalkObservation(
         graph=G,
         seed=123,
-        num_walkers=10,
-        num_steps=5,
-        stopping_param=0.1,
-        leaky=0.1,
+        num_walkers=10, # int(Unif(sqrt(n)/log n, sqrt(n)))
+        num_steps=5, # int(Unif(5, n/ num_walkers*log(n))) 
+        stopping_param=0.1, # CONSTANT 
+        leaky=0.1, # CONSTANT
     )
 
     # get your random-walk edges

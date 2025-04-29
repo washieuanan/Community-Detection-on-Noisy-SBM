@@ -1,16 +1,9 @@
+from typing import List, Tuple, Any
 import os
 import sys
 from abc import ABC, abstractmethod
 import numpy as np
 import networkx as nx
-from typing import List, Tuple, Any
-
-# Ensure repo root is on sys.path for package imports
-_repo_root = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
 
 
 class Detection(ABC):
@@ -29,7 +22,8 @@ class Detection(ABC):
     def __init__(
         self,
         graph: nx.Graph,
-        observations: List[Tuple[Any, Any]]
+        observations: List[Tuple[Any, Any]], 
+        k: int
     ):
         if not isinstance(graph, nx.Graph):
             raise TypeError("`graph` must be a networkx.Graph instance")
@@ -41,6 +35,7 @@ class Detection(ABC):
 
         self.graph = graph
         self.observations = observations
+        self.k = k
 
     @abstractmethod
     def output(self) -> np.ndarray:
