@@ -4,7 +4,7 @@ import numpy as np
 
 from .observe import Observation
 
-def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0):
+def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0, return_groups=False):
     """
     Gets observations on graph G using num_walkers doing Metropolis-Hastings 
     random walks. Each walker spawns at an unobserved node and walks for num_steps.
@@ -14,12 +14,13 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
 
     observed_nodes = set()
     observations = []
-
+    grouped_observations = [0]*num_walkers
     np.random.seed(seed)
 
     all_nodes = set(G.nodes())
 
     for walker in range(num_walkers):
+        walker_observations = []
         possible_start_nodes = list(all_nodes - observed_nodes)
         
         if not possible_start_nodes:
@@ -48,10 +49,14 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
             if np.random.rand() <= acceptance_prob:
                 if np.random.rand() > leaky:
                     # Record edge observation if not skipping due to leaky
-                    observations.append([current_node, proposed_node])
+                    walker_observations.append([current_node, proposed_node])
                 current_node = proposed_node  # Move accepted
                 observed_nodes.add(current_node)
+        observations.extend(walker_observations)
+        grouped_observations[walker] = walker_observations
 
+    if return_groups:
+        return grouped_observations
     return observations
 
 class RandomWalkObservation(Observation):
@@ -103,6 +108,29 @@ class RandomWalkObservation(Observation):
         self.observations = [tuple(edge) for edge in raw_obs]
         return self.observations
 
+
+class GroupedRandomWalkObservation(RandomWalkObservation):
+    """
+    Grouped version of RandomWalkObservation.
+    """
+
+    def observe(self) -> List[List[Tuple[Any, Any]]]:
+        # draw an independent seed for the global numpy RNG inside random_walk_observations
+        rw_seed = int(self.rng.integers(2**32 - 1))
+        raw_obs = random_walk_observations(
+            G=self.graph,
+            num_walkers=self.num_walkers,
+            num_steps=self.num_steps,
+            stopping_param=self.stopping_param,
+            leaky=self.leaky,
+            seed=rw_seed,
+            return_groups=True,
+        )
+        self.observations = [0]*self.num_walkers
+        for ix, group in enumerate(raw_obs):
+            self.observations[ix] = [tuple(edge) for edge in group]
+        return self.observations
+    
 if __name__ == "__main__":
     # Example usage
     # G = nx.erdos_renyi_graph(100, 0.05)
