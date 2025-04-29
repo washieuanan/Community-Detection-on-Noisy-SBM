@@ -15,7 +15,7 @@ from experiments.graph_generation.generate_graph import (
     NUM_VERTICES_CLUSTER_2,
 )
 
-from experiments.observations.observe import get_coordinate_distance
+# from experiments.observations.observe import get_coordinate_distance
 import numpy as np
 import networkx as nx
 

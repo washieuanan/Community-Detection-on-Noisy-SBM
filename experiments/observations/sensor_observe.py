@@ -258,7 +258,6 @@ class MultiSensorObservation(Observation):
             seed=gather_seed,
             deduplicate_edges=self.deduplicate_edges,
         )
-
         observations = []
         for radi in self.radii:
             for u, v in obs_global[radi]:
@@ -266,9 +265,41 @@ class MultiSensorObservation(Observation):
 
         self.observations = observations
         return self.observations
+
+
+class GroupedMultiSensorObservation(MultiSensorObservation):
+    """
+    observations returned grouped by sensor
+    """
+
+    def observe(self) -> List[Dict[float, List[List[int]]]]:
+        """return observations grouped by sensor"""
+        pick_seed = int(self.rng.integers(2**63 - 1))
+        self.sensors = pick_sensors(
+            self.graph,
+            num_sensors=self.num_sensors,
+            min_sep=self.min_sep,
+            seed=pick_seed,
+        )
+        seed = int(self.rng.integers(2**63 - 1))
+        master_rng = np.random.default_rng(seed)
+        all_obs = [0] * self.num_sensors
+        all_fs = [0] * self.num_sensors
+        for i, sensor in enumerate(self.sensors):
+            s_seed = master_rng.integers(2**63 - 1)
+            obs_s, fs_s = sensor_observations(
+                self.graph, sensor, self.radii,
+                prob_fn=self.prob_fn,
+                seed=int(s_seed),
+                deduplicate_edges=self.deduplicate_edges,
+            )
+            all_obs[i] = obs_s
+            all_fs[i] = fs_s
+        self.observations = all_obs
+        return self.observations
     
 if __name__ == "__main__":
-    from graph_generation.generate_graph import generate_latent_geometry_graph
+    from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
 
     # G, coords, _ = generate_latent_geometry_graph([30, 40],
     #                                               connectivity_threshold=0.75)
@@ -287,13 +318,15 @@ if __name__ == "__main__":
 
     single = SingleSensorObservation(G, seed=42, sensor=0, radii=np.linspace(0.1,1.0,10))
     edges1 = single.observe()
-    print("Edges 1:", edges1)
+    # print("Edges 1:", edges1)
 
     # Multi-sensor:
     multi = MultiSensorObservation(G, seed=42, num_sensors=3, radii=np.linspace(0.1,1.0,10))
     edges2 = multi.observe()
-    print("Edges 2:", edges2)
+    # print("Edges 2:", edges2)
 
+    edges3 = multi.grouped_observations()
+    # print("Grouped Edges 3:", edges3[0][np.float64(0.1)])
     # sensors = pick_sensors(G, num_sensors=3, min_sep=0.18, seed=7)
 
     # r_grid = np.linspace(0.1, 1.0, 12)

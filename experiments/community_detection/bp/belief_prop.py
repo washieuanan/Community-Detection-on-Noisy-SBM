@@ -2,8 +2,9 @@ import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 from copy import deepcopy
-
-
+from typing import Literal
+from scipy.stats import chi2_contingency, permutation_test
+from sklearn.metrics import accuracy_score, confusion_matrix
 def get_sbm(
     num_nodes: int,
     num_communities: int,
@@ -83,7 +84,7 @@ def get_true_communities(G: nx.Graph):
 
 def detection_stats(preds, true):
     """calculates basic stats for community detection"""
-    num_communities = np.unique(true).size
+    num_communities = max(max(preds), max(true)) + 1
     true_grouping = {}
     pred_grouping = {}
     for comm in range(num_communities):
@@ -92,32 +93,45 @@ def detection_stats(preds, true):
         
     # get permuation of pred_groupings that most closely matches true_groupings
     perm = np.zeros(num_communities)
-    for comm in range(num_communities):
+    available_comms = {c for c in range(num_communities)}
+    sorted_pred_grouping = sorted(list(range(num_communities)), 
+                                  key=lambda x: len(pred_grouping[x]), 
+                                  reverse=True)
+    for comm in sorted_pred_grouping:
         max_size = 0
         max_comm = -1
-        for comm2 in range(num_communities):
+        for comm2 in available_comms:
             size = len(np.intersect1d(pred_grouping[comm], true_grouping[comm2]))
-            if size > max_size:
+            if size >= max_size:
                 max_size = size
                 max_comm = comm2
         perm[comm] = max_comm
+        available_comms.remove(max_comm)
 
-    # calculate accuracy
+    permed_pred = np.array([perm[preds[i]] for i in range(len(preds))])
+    
     stats = {}
-    num_correct = 0
-    for n in range(len(preds)):
-        if true[n] == perm[preds[n]]:
-            num_correct += 1
-    stats["accuracy"] = num_correct / len(preds)
+    stats["accuracy"] = accuracy_score(true, permed_pred)
 
     # accuracy per community
     for comm in range(num_communities):
-        num_correct = 0
-        for n in true_grouping[comm]:
-            if perm[preds[n]] == comm:
-                num_correct += 1
-        stats[f"accuracy_{comm}"] = num_correct / len(true_grouping[comm])
-
+        true_comm = [true[i] for i in true_grouping[comm]]
+        pred_comm = [permed_pred[i] for i in true_grouping[comm]]
+        stats[f"accuracy_{comm}"] = accuracy_score(true_comm, pred_comm)
+    
+    res = permutation_test(
+        (true, permed_pred),
+        statistic=lambda x, y: accuracy_score(x, y),
+        vectorized=False,
+        n_resamples=10_000,
+        alternative='greater',  
+        random_state=0
+    )
+    
+    stats["perm_p"] = int(res.pvalue)
+    
+    stats["num vertices"] = len(preds)
+    stats["num communities predicted"] = len(np.unique(preds))
     return stats
 
 
@@ -126,6 +140,58 @@ def get_marginals_and_preds(G: nx.Graph):
     preds = np.argmax(marginals, axis=1)
     return marginals, preds
 
+def initialize_messages(G: nx.Graph, 
+                        q: int,
+                        method: tuple[Literal["random", "copy", "pre-group"]], 
+                        seed: int = 0,
+                        group_obs = None,
+                        min_sep = None):
+    """initialize messages for belief propagation"""
+    rng = np.random.default_rng(seed)
+    if method == "random":
+        return {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 
+                for i in G 
+                for j in G.neighbors(i)}
+    elif method == "copy":
+        return {(i, j): G.nodes[i]["beliefs"] 
+                for i in G 
+                for j in G.neighbors(i)}
+    elif method == "pre-group":
+        if not group_obs:
+            assert "Need to provide grouped observations for this method"
+        bias_assignment = np.zeros(len(group_obs), dtype=int)
+        # deterministic bias assignment
+        for group in range(len(bias_assignment)):
+            bias_assignment[group] = group % q
+            
+        messages = {}
+        messages = {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 
+                    for i in G 
+                    for j in G.neighbors(i)}
+        for group in range(len(group_obs)):
+            bias_vector = np.zeros(q)
+            if min_sep:
+                bias_vector[bias_assignment[group]] = min_sep
+            else:
+                bias_vector[bias_assignment[group]] = 0.15
+            if isinstance(group_obs[group], dict):
+                for rad in group_obs[group]:
+                    rad_adj = np.zeros(q)
+                    rad_adj[bias_assignment[group]] = -1*rad
+                    
+                    for u, v in group_obs[group][rad]:
+                        messages[(int(u), int(v))] = messages[(u, v)] + bias_vector + rad_adj
+                        messages[(int(u), int(v))] = messages[(u, v)] / np.sum(messages[(u, v)])
+                        messages[(int(v), int(u))] = messages[(u, v)] + bias_vector + rad_adj
+                        messages[(int(v), int(u))] = messages[(u, v)] / np.sum(messages[(u, v)])
+            else:
+                for u, v in group_obs[group]:
+                    messages[(int(u), int(v))] = messages[(u, v)] + bias_vector
+                    messages[(int(u), int(v))] = messages[(u, v)] / np.sum(messages[(u, v)])
+                    messages[(int(v), int(u))] = messages[(u, v)] + bias_vector
+                    messages[(int(v), int(u))] = messages[(u, v)] / np.sum(messages[(u, v)])
+        return messages
+    
 def belief_propagation(
     G: nx.Graph,
     q: int,
@@ -138,6 +204,9 @@ def belief_propagation(
     degen_threshold: float = 0.9,  # Lower threshold to detect degeneration earlier
     seed: int = 0,
     min_steps: int = 0,
+    message_init: tuple[Literal["random", "copy", "pre-group"]] = "random",
+    group_obs = None,
+    min_sep = None,
 ):
     """
     Belief propagation from Zhang et. al. 2014
@@ -169,8 +238,9 @@ def belief_propagation(
     if beta is None:
         beta = calc_beta_param(G, q)
     
-    messages = {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 for i in G for j in G.neighbors(i)}
-    
+    messages = initialize_messages(G, q, 
+                                   message_init, seed=seed, 
+                                   group_obs=group_obs, min_sep=min_sep)
     old_messages = deepcopy(messages)
     
     beta_schedule = np.linspace(beta * 0.1, beta, anneal_steps)
@@ -248,7 +318,8 @@ def belief_propagation(
                     for edge in messages:
                         noise = rng.random(q) * 0.15 * inv_sizes
                         messages[edge] = messages[edge] * 0.85 + noise
-                        messages[edge] /= messages[edge].sum()
+                        if messages[edge].sum() > 0:
+                            messages[edge] /= messages[edge].sum()
     else:
         print(f"BP did not converge in {max_iter} iterations")
         
@@ -264,31 +335,77 @@ def belief_propagation(
     print(f"Final community proportions: {community_sizes}")
     
 if __name__ == "__main__":
-    num_nodes = 100
-    num_communities = 3
-    interior_prob = 0.7  # Increased internal connectivity
-    exterior_prob = 0.05  # Decreased external connectivity
-    
-    print(f"Creating SBM with {num_nodes} nodes, {num_communities} communities")
-    print(f"Interior probability: {interior_prob}, Exterior probability: {exterior_prob}")
-    
-    G = get_sbm(num_nodes, num_communities, interior_prob, exterior_prob)
-    initialize_beliefs(G, num_communities)
-    
-    belief_propagation(
-        G, 
-        num_communities, 
-        max_iter=1000,
-        damping=0.3,
-        anneal_steps=30,
-        balance_regularization=0.1,
+    from experiments.observations.sensor_observe import GroupedMultiSensorObservation
+    from experiments.graph_generation.gbm import generate_gbm
+    from experiments.community_detection.bp.gbm_bp import create_observed_subgraph
+    from experiments.observations.random_walk_obs import GroupedRandomWalkObservation
+    G2 = generate_gbm(
+        n=300,
+        K=3,
+        r_in=0.25,
+        r_out=0.1,
+        p_in=0.9,
+        p_out=0.2,
+        seed=123
     )
-    true_comms = get_true_communities(G)
-    marginals, preds = get_marginals_and_preds(G)
+    # sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
+    # r_grid = np.linspace(0.1, 1.0, 12)
+    # obs, first_seen = gather_multi_sensor_observations(
+    #         G2, sensors, r_grid, seed=99, deduplicate_edges=True)
+    # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=10,
+    #                                      num_steps=5, stopping_param=0.1,
+    #                                   leaky=0.1,)
+    multi = GroupedMultiSensorObservation(G2, seed=42, num_sensors=3, radii=np.linspace(0.1,1.0,10))
+
+    edges = multi.observe()
+    # print("Edges 2:", edges2)
+
+    observations = []
+    for g in edges:
+        for r, obs in g.items():
+            for u, v in obs:
+                observations.append((u, v))
+    # for g in edges:
+    #     for u, v in g:
+    #         observations.append((u, v))
     
-    unique_true, true_counts = np.unique(true_comms, return_counts=True)
-    unique_pred, pred_counts = np.unique(preds, return_counts=True)
+    # New approach - get all unique edges across all radii
+    # unique_edges = get_unique_edges(obs)
     
-    print("True community sizes:", dict(zip(unique_true, true_counts)))
-    print("Predicted community sizes:", dict(zip(unique_pred, pred_counts)))
-    print("Detection stats:", detection_stats(preds, true_comms))
+    # Print counts to compare
+    print(f"Total observations (may include duplicates): {len(observations)}")
+    # print(f"Unique edges: {len(unique_edges)}")
+    
+    observed_nodes = set()
+    for u, v in observations:
+        observed_nodes.add(u)
+        observed_nodes.add(v)
+    # print(observations)
+    
+    # subG = create_observed_subgraph(100, observations)``
+    subG = create_observed_subgraph(len(G2.nodes), observations)
+    # subG =iG2 
+    initialize_beliefs(subG, 3)
+    # messages = initialize_messages(subG, 3, "pre-group", group_obs=edges, min_sep=0.15)
+    # print(messages)
+    belief_propagation(
+        subG, 
+        q=3, 
+        max_iter=1000,
+        damping=0.2,
+        anneal_steps=150,    
+        balance_regularization=0.2,
+        min_steps=50,
+        message_init="pre-group",
+        group_obs=edges,
+        min_sep=0.3,
+    )
+    marginals, preds = get_marginals_and_preds(subG)
+    # cluster_map = np.array(cluster_map2)
+    cluster_map = nx.get_node_attributes(G2, 'comm')
+    cluster_map = np.array(list(cluster_map.values()))
+    sub_preds = np.array([preds[i] for i in range(len(preds)) if i in observed_nodes])
+    sub_cluster_map = np.array([cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes])
+    print(detection_stats(preds, cluster_map))
+    print(detection_stats(sub_preds, sub_cluster_map))
+    
