@@ -3,8 +3,12 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from typing import Literal
-from scipy.stats import chi2_contingency, permutation_test
+from scipy.stats import chi2_contingency, permutation_test, mode
 from sklearn.metrics import accuracy_score, confusion_matrix
+import scipy.sparse.linalg as sla
+from sklearn.cluster import KMeans
+
+
 def get_sbm(
     num_nodes: int,
     num_communities: int,
@@ -39,7 +43,8 @@ def initialize_beliefs(G: nx.Graph, q: int, seed=0):
     for node in G.nodes():
         rand_belief = rng.dirichlet(np.ones(q), size=1)[0]
         G.nodes[node]["beliefs"] = rand_belief
-        
+
+
 def calc_beta_param(G: nx.Graph, num_communities: int):
     """
     Calculate beta parameter according to Zhang et al. 2014 - spin glass model
@@ -48,13 +53,13 @@ def calc_beta_param(G: nx.Graph, num_communities: int):
     vertex_degs = [G.degree[n] for n in G.nodes()]
     avg_deg = np.mean(vertex_degs)
     n_nodes = G.number_of_nodes()
-    
+
     # Base beta calculation with safety for numerical stability
     base_beta = np.log(num_communities / (max(np.sqrt(avg_deg) - 1, 1e-10)) + 1)
-    
+
     # Scale beta based on graph density to improve convergence
     density = avg_deg / (n_nodes - 1)
-    
+    print("Graph Density:", density)
     # Updated density scaling to match community structure better
     # Lower beta for denser graphs, higher for sparser graphs
     if density > 0.3:  # Dense graph
@@ -62,16 +67,16 @@ def calc_beta_param(G: nx.Graph, num_communities: int):
     elif density > 0.1:  # Medium density
         density_factor = 1.0
     else:  # Sparse graph
-        density_factor = 1.2
-        
+        density_factor = 1.4
+
     # Adjust beta based on expected community sizes
     # For more balanced communities, we want a slightly higher beta
     community_balance_factor = 1.0
     if num_communities > 1:
         expected_size = n_nodes / num_communities
         if expected_size > 20:  # Large communities need lower beta
-            community_balance_factor = 0.9
-    
+            community_balance_factor = 0.8
+
     beta = base_beta * density_factor * community_balance_factor
     return max(1.0, min(5.0, beta))  # Keep beta in reasonable range
 
@@ -90,13 +95,13 @@ def detection_stats(preds, true):
     for comm in range(num_communities):
         true_grouping[comm] = np.where(true == comm)[0]
         pred_grouping[comm] = np.where(preds == comm)[0]
-        
+
     # get permuation of pred_groupings that most closely matches true_groupings
     perm = np.zeros(num_communities)
     available_comms = {c for c in range(num_communities)}
-    sorted_pred_grouping = sorted(list(range(num_communities)), 
-                                  key=lambda x: len(pred_grouping[x]), 
-                                  reverse=True)
+    sorted_pred_grouping = sorted(
+        list(range(num_communities)), key=lambda x: len(pred_grouping[x]), reverse=True
+    )
     for comm in sorted_pred_grouping:
         max_size = 0
         max_comm = -1
@@ -109,7 +114,7 @@ def detection_stats(preds, true):
         available_comms.remove(max_comm)
 
     permed_pred = np.array([perm[preds[i]] for i in range(len(preds))])
-    
+
     stats = {}
     stats["accuracy"] = accuracy_score(true, permed_pred)
 
@@ -118,18 +123,18 @@ def detection_stats(preds, true):
         true_comm = [true[i] for i in true_grouping[comm]]
         pred_comm = [permed_pred[i] for i in true_grouping[comm]]
         stats[f"accuracy_{comm}"] = accuracy_score(true_comm, pred_comm)
-    
+
     res = permutation_test(
         (true, permed_pred),
         statistic=lambda x, y: accuracy_score(x, y),
         vectorized=False,
         n_resamples=10_000,
-        alternative='greater',  
-        random_state=0
+        alternative="greater",
+        random_state=0,
     )
-    
+
     stats["perm_p"] = int(res.pvalue)
-    
+
     stats["num vertices"] = len(preds)
     stats["num communities predicted"] = len(np.unique(preds))
     return stats
@@ -140,214 +145,228 @@ def get_marginals_and_preds(G: nx.Graph):
     preds = np.argmax(marginals, axis=1)
     return marginals, preds
 
-def initialize_messages(G: nx.Graph, 
-                        q: int,
-                        method: tuple[Literal["random", "copy", "pre-group"]], 
-                        seed: int = 0,
-                        group_obs = None,
-                        min_sep = None):
+
+def initialize_messages(
+    G: nx.Graph,
+    q: int,
+    method: tuple[Literal["random", "copy", "pre-group"]],
+    seed: int = 0,
+    group_obs=None,
+    min_sep=None,
+    eps=0.2,
+):
     """initialize messages for belief propagation"""
     rng = np.random.default_rng(seed)
+    spectral_infos = spectral_clustering(G, q, seed=seed)
     if method == "random":
-        return {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 
-                for i in G 
-                for j in G.neighbors(i)}
+        messages = {
+            (i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3
+            for i in G
+            for j in G.neighbors(i)
+        }
+        eps0 = eps
+        # add bias towards spectral label
+        for (i, j), mes in messages.items():
+            spec_label = spectral_infos[i]
+            mes[spec_label] += eps0
+            mes /= mes.sum()
+            messages[(i, j)] = mes
+        return messages
     elif method == "copy":
-        return {(i, j): G.nodes[i]["beliefs"] 
-                for i in G 
-                for j in G.neighbors(i)}
+        messages = {(i, j): G.nodes[i]["beliefs"] for i in G for j in G.neighbors(i)}
+        eps0 = eps
+        # add bias towards spectral label
+        for (i, j), mes in messages.items():
+            spec_label = spectral_infos[i]
+            mes[spec_label] += eps0
+            mes /= mes.sum()
+            messages[(i, j)] = mes
+        return messages
     elif method == "pre-group":
         if not group_obs:
             assert "Need to provide grouped observations for this method"
         bias_assignment = np.zeros(len(group_obs), dtype=int)
-        # deterministic bias assignment
         for group in range(len(bias_assignment)):
-            bias_assignment[group] = group % q
-            
+            if isinstance(group_obs[group], dict):
+                group_spec_labels = [
+                    spectral_infos[i]
+                    for i, _ in group_obs[group][r]
+                    for r in group_obs[group]
+                ]
+            else:
+                group_spec_labels = [spectral_infos[i] for i, _ in group_obs[group]]
+            if len(group_spec_labels) == 0:
+                bias_assignment[group] = -1
+            else:
+                bias_assignment[group] = mode(group_spec_labels)[0]
         messages = {}
-        messages = {(i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3 
-                    for i in G 
-                    for j in G.neighbors(i)}
+        messages = {
+            (i, j): rng.dirichlet(np.ones(q), size=1)[0] + 1e-3
+            for i in G
+            for j in G.neighbors(i)
+        }
         for group in range(len(group_obs)):
+            if bias_assignment[group] == -1:
+                continue
             bias_vector = np.zeros(q)
             if min_sep:
-                bias_vector[bias_assignment[group]] = min_sep
+                bias_vector[bias_assignment[group]] = np.sqrt(min_sep)
             else:
-                bias_vector[bias_assignment[group]] = 0.15
+                bias_vector[bias_assignment[group]] = np.sqrt(0.15)
             if isinstance(group_obs[group], dict):
                 for rad in group_obs[group]:
                     rad_adj = np.zeros(q)
-                    rad_adj[bias_assignment[group]] = -1*rad
-                    
+                    rad_adj[bias_assignment[group]] = -0.2 * np.exp(rad)
+
                     for u, v in group_obs[group][rad]:
-                        messages[(int(u), int(v))] = messages[(u, v)] + bias_vector + rad_adj
-                        messages[(int(u), int(v))] = messages[(u, v)] / np.sum(messages[(u, v)])
-                        messages[(int(v), int(u))] = messages[(u, v)] + bias_vector + rad_adj
-                        messages[(int(v), int(u))] = messages[(u, v)] / np.sum(messages[(u, v)])
+                        messages[(int(u), int(v))] = (
+                            messages[(u, v)] + bias_vector + rad_adj
+                        )
+                        messages[(int(u), int(v))] = messages[(u, v)] / np.sum(
+                            messages[(u, v)]
+                        )
+                        messages[(int(v), int(u))] = (
+                            messages[(u, v)] + bias_vector + rad_adj
+                        )
+                        messages[(int(v), int(u))] = messages[(u, v)] / np.sum(
+                            messages[(u, v)]
+                        )
             else:
                 for u, v in group_obs[group]:
                     messages[(int(u), int(v))] = messages[(u, v)] + bias_vector
-                    messages[(int(u), int(v))] = messages[(u, v)] / np.sum(messages[(u, v)])
+                    messages[(int(u), int(v))] = messages[(u, v)] / np.sum(
+                        messages[(u, v)]
+                    )
                     messages[(int(v), int(u))] = messages[(u, v)] + bias_vector
-                    messages[(int(v), int(u))] = messages[(u, v)] / np.sum(messages[(u, v)])
+                    messages[(int(v), int(u))] = messages[(u, v)] / np.sum(
+                        messages[(u, v)]
+                    )
         return messages
-    
+
+
+def spectral_clustering(G, q, seed=0):
+    A = nx.adjacency_matrix(G)
+    vals, vecs = sla.eigs(A, k=q, which="LM", tol=1e-2)
+    coords = np.real(vecs)
+    km = KMeans(n_clusters=q, random_state=seed).fit(coords)
+    return {node: int(km.labels_[i]) for i, node in enumerate(G)}
+
+
 def belief_propagation(
     G: nx.Graph,
     q: int,
     beta: float | None = None,
     max_iter: int = 1000,
     tol: float = 1e-4,
-    damping: float = 0.3,  # Lower damping for better exploration
-    anneal_steps: int = 30,  # More annealing steps
-    balance_regularization: float = 0.1,  # Community balance regularization
-    degen_threshold: float = 0.9,  # Lower threshold to detect degeneration earlier
+    damping: float = 0.3,
+    anneal_steps: int = 30,
+    balance_regularization: float = 0.1,
+    degen_threshold: float = 0.9,
     seed: int = 0,
     min_steps: int = 0,
     message_init: tuple[Literal["random", "copy", "pre-group"]] = "random",
-    group_obs = None,
-    min_sep = None,
+    group_obs=None,
+    min_sep=None,
 ):
-    """
-    Belief propagation from Zhang et. al. 2014
-    danke chatgpt
-    Parameters:
-    ----------
-    G : nx.Graph
-        Input graph
-    q : int
-        Number of communities
-    beta : float, optional
-        Interaction strength parameter
-    max_iter : int
-        Maximum number of iterations
-    tol : float
-        Convergence tolerance
-    damping : float
-        Damping factor for update smoothing
-    anneal_steps : int
-        Number of temperature annealing steps
-    seed : int
-        Random seed
-    """
     np.random.seed(seed)
     rng = np.random.default_rng(seed)
     m = G.number_of_edges()
     deg = dict(G.degree())
     c = np.mean(list(deg.values()))
+
     if beta is None:
-        beta = calc_beta_param(G, q)
-    
-    messages = initialize_messages(G, q, 
-                                   message_init, seed=seed, 
-                                   group_obs=group_obs, min_sep=min_sep)
+        beta = calc_beta_param(G, q) * 1.1
+
+    messages = initialize_messages(
+        G, q, message_init, seed=seed, group_obs=group_obs, min_sep=min_sep
+    )
+
     old_messages = deepcopy(messages)
-    
     beta_schedule = np.linspace(beta * 0.1, beta, anneal_steps)
     convergence_history = []
-    
+
     for it in range(max_iter):
-        if it < anneal_steps:
-            current_beta = beta_schedule[it]
-        else:
-            current_beta = beta
+        current_beta = beta_schedule[it] if it < anneal_steps else beta
         old_messages, messages = messages, old_messages
 
+        # update beliefs
         for i in G:
             prod = np.ones(q)
             for t in range(q):
                 s = 0.0
                 for j in G.neighbors(i):
-                    msg_value = max(1e-10, old_messages[(j, i)][t])
-                    s += np.log(1 + (np.exp(current_beta) - 1) * msg_value)
+                    msg_value = np.clip(old_messages[(j, i)][t], 1e-10, 1)
+                    s += np.log1p(np.expm1(current_beta) * msg_value)
                 prod[t] = np.exp(s)
-            prod /= prod.sum()
+            prod /= np.clip(prod.sum(), 1e-10, None)
             G.nodes[i]["beliefs"] = prod
-        community_sizes = np.zeros(q)
-        theta = np.zeros(q)
-        for t in range(q):
-            community_sizes[t] = sum(G.nodes[u]["beliefs"][t] for u in G) / len(G)
-            theta[t] = sum(deg[u] * G.nodes[u]["beliefs"][t] for u in G)
 
+        # compute community sizes and theta
+        community_sizes = np.array(
+            [sum(G.nodes[u]["beliefs"][t] for u in G) for t in range(q)]
+        ) / len(G)
+        theta = np.array(
+            [sum(deg[u] * G.nodes[u]["beliefs"][t] for u in G) for t in range(q)]
+        )
+
+        # message updates
         for i in G:
             deg_i = deg[i]
             neigh_i = list(G.neighbors(i))
-
             for k in neigh_i:
-                log_new_msg = np.zeros(q)
-                
+                log_new = np.zeros(q)
                 for t in range(q):
                     term1 = -current_beta * deg_i * theta[t] / (2 * m)
-                    
-                    term2 = 0.0
-                    for j in neigh_i:
-                        if j == k:
-                            continue
-                        msg_value = max(1e-10, old_messages[(j, i)][t])
-                        term2 += np.log(1 + (np.exp(current_beta) - 1) * msg_value)
-                    
-                    # Penalize assignment to large communities, boost small ones
-                    size_penalty = balance_regularization * np.log(community_sizes[t] + 1e-10)
-                    
-                    log_new_msg[t] = term1 + term2 - size_penalty
-                
-                max_val = np.max(log_new_msg)
-                new_msg = np.exp(log_new_msg - max_val)
+                    term2 = sum(
+                        np.log(
+                            1
+                            + (np.exp(current_beta) - 1)
+                            * max(1e-10, old_messages[(j, i)][t])
+                        )
+                        for j in neigh_i
+                        if j != k
+                    )
+                    size_penalty = -balance_regularization * np.log(
+                        community_sizes[t] + 1e-10
+                    )
+                    log_new[t] = term1 + term2 - size_penalty
+                maxv = log_new.max()
+                new_msg = np.exp(log_new - maxv)
                 new_msg /= new_msg.sum()
-                
-                messages[(i, k)] = (1 - damping) * new_msg + damping * old_messages[(i, k)]
-                messages[(i, k)] = messages[(i, k)] / np.sum(messages[(i, k)])
-                
-        delta = max(
-            np.abs(messages[(i, k)] - old_messages[(i, k)]).max() for i, k in messages
-        )
+                m_old = old_messages[(i, k)]
+                m_upd = (1 - damping) * new_msg + damping * m_old
+                messages[(i, k)] = m_upd / m_upd.sum()
+
+        # check convergence
+        delta = max(abs(messages[e] - old_messages[e]).max() for e in messages)
         convergence_history.append(delta)
-               
         if delta < tol and it > min_steps:
-            community_entropy = -np.sum(community_sizes * np.log(community_sizes + 1e-10))
-            ideal_entropy = -np.log(1/q)
-            entropy_ratio = community_entropy / ideal_entropy
-            
-            if entropy_ratio > 0.7: 
-                print(f"BP converged in {it+1} iterations, entropy ratio: {entropy_ratio:.3f}")
+            ent = -np.sum(community_sizes * np.log(community_sizes + 1e-10))
+            if ent / (-np.log(1 / q)) > 0.7:
+                print(
+                    f"BP converged in {it+1} iters; entropy ratio {ent/(-np.log(1/q)):.3f}"
+                )
                 break
-            else:
-                if it > anneal_steps:
-                    inv_sizes = 1.0 / (community_sizes + 1e-10)
-                    inv_sizes = inv_sizes / np.sum(inv_sizes)
-                    for edge in messages:
-                        noise = rng.random(q) * 0.15 * inv_sizes
-                        messages[edge] = messages[edge] * 0.85 + noise
-                        if messages[edge].sum() > 0:
-                            messages[edge] /= messages[edge].sum()
+            for e in messages:
+                noise = rng.random(q) * 0.15 / (community_sizes + 1e-10)
+                messages[e] = messages[e] * 0.85 + noise
+                messages[e] /= messages[e].sum()
     else:
         print(f"BP did not converge in {max_iter} iterations")
-        
-    community_sizes = np.zeros(q)
-    for t in range(q):
-        community_sizes[t] = sum(G.nodes[u]["beliefs"][t] for u in G) / len(G)
-    
-    community_entropy = -np.sum(community_sizes * np.log(community_sizes + 1e-10))
-    ideal_entropy = -np.log(1/q)
-    entropy_ratio = community_entropy / ideal_entropy
-    
-    print(f"Final beta: {beta}")
-    print(f"Final community proportions: {community_sizes}")
-    
+    return
+
+
 if __name__ == "__main__":
     from experiments.observations.sensor_observe import GroupedMultiSensorObservation
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.community_detection.bp.gbm_bp import create_observed_subgraph
     from experiments.observations.random_walk_obs import GroupedRandomWalkObservation
-    G2 = generate_gbm(
-        n=300,
-        K=3,
-        r_in=0.25,
-        r_out=0.1,
-        p_in=0.9,
-        p_out=0.2,
-        seed=123
+    from experiments.observations.standard_observe import (
+        PairSamplingObservation,
+        get_coordinate_distance,
     )
+
+    G2 = generate_gbm(n=300, K=4, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
     # sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
     # r_grid = np.linspace(0.1, 1.0, 12)
     # obs, first_seen = gather_multi_sensor_observations(
@@ -355,11 +374,18 @@ if __name__ == "__main__":
     # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=10,
     #                                      num_steps=5, stopping_param=0.1,
     #                                   leaky=0.1,)
-    multi = GroupedMultiSensorObservation(G2, seed=42, num_sensors=3, radii=np.linspace(0.1,1.0,10))
+    multi = GroupedMultiSensorObservation(
+        G2, seed=42, num_sensors=6, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
+    )
 
     edges = multi.observe()
-    # print("Edges 2:", edges2)
+    # def weight_func(c1, c2):
+    #     return np.exp(-0.5 * get_coordinate_distance(c1, c2))
 
+    # Pair-based sampling
+    # pair_sampler = PairSamplingObservation(G2, num_samples=70, weight_func=weight_func, seed=42)
+    # print("Edges 2:", edges2)
+    # observations = pair_sampler.observe()
     observations = []
     for g in edges:
         for r, obs in g.items():
@@ -368,44 +394,45 @@ if __name__ == "__main__":
     # for g in edges:
     #     for u, v in g:
     #         observations.append((u, v))
-    
+
     # New approach - get all unique edges across all radii
     # unique_edges = get_unique_edges(obs)
-    
+
     # Print counts to compare
     print(f"Total observations (may include duplicates): {len(observations)}")
     # print(f"Unique edges: {len(unique_edges)}")
-    
+
     observed_nodes = set()
     for u, v in observations:
         observed_nodes.add(u)
         observed_nodes.add(v)
     # print(observations)
-    
+
     # subG = create_observed_subgraph(100, observations)``
     subG = create_observed_subgraph(len(G2.nodes), observations)
-    # subG =iG2 
-    initialize_beliefs(subG, 3)
+    # subG =iG2
+    initialize_beliefs(subG, 4)
     # messages = initialize_messages(subG, 3, "pre-group", group_obs=edges, min_sep=0.15)
     # print(messages)
     belief_propagation(
-        subG, 
-        q=3, 
-        max_iter=1000,
+        subG,
+        q=4,
+        max_iter=1500,
         damping=0.2,
-        anneal_steps=150,    
-        balance_regularization=0.2,
+        anneal_steps=150,
+        balance_regularization=0.05,
         min_steps=50,
         message_init="pre-group",
         group_obs=edges,
-        min_sep=0.3,
+        min_sep=0.15,
     )
     marginals, preds = get_marginals_and_preds(subG)
     # cluster_map = np.array(cluster_map2)
-    cluster_map = nx.get_node_attributes(G2, 'comm')
+    cluster_map = nx.get_node_attributes(G2, "comm")
     cluster_map = np.array(list(cluster_map.values()))
     sub_preds = np.array([preds[i] for i in range(len(preds)) if i in observed_nodes])
-    sub_cluster_map = np.array([cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes])
+    sub_cluster_map = np.array(
+        [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
+    )
     print(detection_stats(preds, cluster_map))
     print(detection_stats(sub_preds, sub_cluster_map))
-    
