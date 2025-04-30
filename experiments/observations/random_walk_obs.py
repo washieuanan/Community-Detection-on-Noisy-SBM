@@ -3,6 +3,7 @@ import networkx as nx
 import numpy as np
 
 from .observe import Observation
+from experiments.graph_generation.generate_graph import distance_function
 
 def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0, return_groups=False):
     """
@@ -22,7 +23,6 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
     for walker in range(num_walkers):
         walker_observations = []
         possible_start_nodes = list(all_nodes - observed_nodes)
-        
         if not possible_start_nodes:
             current_node = int(np.random.choice(list(all_nodes)))
         else:
@@ -37,8 +37,14 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
             neighbors = list(G.neighbors(current_node))
             if not neighbors:
                 break  
-
-            proposed_node = int(np.random.choice(neighbors))
+            
+            neighbor_distances = np.array([
+                distance_function(G.nodes[current_node]["coords"], G.nodes[neighbor]["coords"])
+                for neighbor in neighbors
+            ])
+            neighbor_exponential = 0.5 * np.exp(-0.5 * neighbor_distances)
+            neighbor_exponential /= np.sum(neighbor_exponential)
+            proposed_node = int(np.random.choice(neighbors, p=neighbor_exponential))
 
             # Metropolis-Hastings acceptance probability
             degree_current = G.degree[current_node]
@@ -137,7 +143,7 @@ if __name__ == "__main__":
     # observations_ = random_walk_observations(G, num_walkers=10, num_steps=5, stopping_param = 0.1, leaky=0.1)
     # print(observations_)
 
-    from graph_generation.generate_graph import generate_latent_geometry_graph
+    from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
     G, coords, _ = generate_latent_geometry_graph([50,50], connectivity_threshold=0.8)
 
     # instantiate
