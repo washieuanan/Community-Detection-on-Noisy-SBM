@@ -366,7 +366,7 @@ if __name__ == "__main__":
         get_coordinate_distance,
     )
 
-    G2 = generate_gbm(n=300, K=4, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
+    G2 = generate_gbm(n=900, K=2, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
     # sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
     # r_grid = np.linspace(0.1, 1.0, 12)
     # obs, first_seen = gather_multi_sensor_observations(
@@ -374,16 +374,23 @@ if __name__ == "__main__":
     # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=10,
     #                                      num_steps=5, stopping_param=0.1,
     #                                   leaky=0.1,)
+    avg_deg = np.mean([G2.degree[n] for n in G2.nodes()])
+    orig_sparsity = avg_deg/len(G2.nodes)
+    print("Original Sparsity:", orig_sparsity)
+    C = 0.3 * orig_sparsity
+    C = 0.001
+    num_sensors = max(int((3 * C)/(avg_deg * len(G2.nodes) * 0.1**3)), 2)
     multi = GroupedMultiSensorObservation(
-        G2, seed=42, num_sensors=6, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
+        G2, seed=42, num_sensors=4, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
     )
-
+    # num_pairs = int(C * avg_deg * len(G2.nodes))
     edges = multi.observe()
     # def weight_func(c1, c2):
     #     return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-
+    print("NUM EDGES:", len(G2.edges))
+    print("SAMPLINHG EDGES:", num_sensors)
     # Pair-based sampling
-    # pair_sampler = PairSamplingObservation(G2, num_samples=70, weight_func=weight_func, seed=42)
+    # pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
     # print("Edges 2:", edges2)
     # observations = pair_sampler.observe()
     observations = []
@@ -411,13 +418,13 @@ if __name__ == "__main__":
     # subG = create_observed_subgraph(100, observations)``
     subG = create_observed_subgraph(len(G2.nodes), observations)
     # subG =iG2
-    initialize_beliefs(subG, 4)
+    initialize_beliefs(subG, 2)
     # messages = initialize_messages(subG, 3, "pre-group", group_obs=edges, min_sep=0.15)
     # print(messages)
     belief_propagation(
         subG,
-        q=4,
-        max_iter=1500,
+        q=2,
+        max_iter=2500,
         damping=0.2,
         anneal_steps=150,
         balance_regularization=0.05,
