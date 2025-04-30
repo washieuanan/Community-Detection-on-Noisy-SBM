@@ -25,7 +25,8 @@ class BayesianGraphInference():
             self.obs_dict = self._process_observations_GMS()
         elif obs_format == 'GRW':
             self.obs_dict = self._process_observations_GRW()
-            
+        self.obs_format = obs_format
+        
         
     def _split_sphere(self):
         """split the unit sphere space into num_obs balls"""
@@ -75,19 +76,25 @@ class BayesianGraphInference():
     
     def _initialize_priors(self):
         """initialize uniform priors for each vertex"""
-        pass
+        self.priors = self.ndarray(len(self.obs_nodes), len(self.centers))
+        for i, o_n in enumerate(self.obs_nodes):
+            self.priors[i] = np.ones(len(self.centers)) / len(self.centers)
     
     def _initialize_likelihood_base(self):
         """initialize likelihood func"""
-        pass
+        # use exponential distribution from weight function to estimate likelihood
+        self.likelihood = None
     
     def _initialize_likelihood_GRW(self):
         """initialize likelihood func"""
-        pass
+        # random walk is a uniform distribution over edges in the node
+        self.likelihood = None
     
     def _initialize_likelihood_GMS(self):
         """initialize likelihood func"""
-        pass
+        # take advantage of radius to estimate likelihood --> Bernoulli likelihood that
+        # observation must be within some radius of center
+        self.likelihood = None
     
     def _update_posterior(self, data):
         """update posterior using Bayes rule"""
@@ -95,5 +102,13 @@ class BayesianGraphInference():
     
     def infer_graph(self):
         """bayesian inference algorithm"""
+        self._initialize_priors()
+        if self.obs_format == 'base':
+            self._initialize_likelihood_base()
+        elif self.obs_format == 'GMS':
+            self._initialize_likelihood_GMS()
+        elif self.obs_format == 'GRW':
+            self._initialize_likelihood_GRW()
+                
         pass
     
