@@ -8,7 +8,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 import scipy.sparse.linalg as sla
 from sklearn.cluster import KMeans
 
-
+# no longer needed
 def get_sbm(
     num_nodes: int,
     num_communities: int,
@@ -54,31 +54,15 @@ def calc_beta_param(G: nx.Graph, num_communities: int):
     avg_deg = np.mean(vertex_degs)
     n_nodes = G.number_of_nodes()
 
-    # Base beta calculation with safety for numerical stability
-    base_beta = np.log(num_communities / (max(np.sqrt(avg_deg) - 1, 1e-10)) + 1)
-
-    # Scale beta based on graph density to improve convergence
+    eps = 1e-3
+    numerator = num_communities*(1+(num_communities - 1)*eps)
+    denominator = max(avg_deg*(1-eps) - (1 + (num_communities - 1)*eps), 1e-10)
+    base_beta = np.log(numerator/denominator + 1)
     density = avg_deg / (n_nodes - 1)
     print("Graph Density:", density)
-    # Updated density scaling to match community structure better
-    # Lower beta for denser graphs, higher for sparser graphs
-    if density > 0.3:  # Dense graph
-        density_factor = 0.8
-    elif density > 0.1:  # Medium density
-        density_factor = 1.0
-    else:  # Sparse graph
-        density_factor = 1.4
-
-    # Adjust beta based on expected community sizes
-    # For more balanced communities, we want a slightly higher beta
-    community_balance_factor = 1.0
-    if num_communities > 1:
-        expected_size = n_nodes / num_communities
-        if expected_size > 20:  # Large communities need lower beta
-            community_balance_factor = 0.8
-
-    beta = base_beta * density_factor * community_balance_factor
-    return max(1.0, min(5.0, beta))  # Keep beta in reasonable range
+    beta = base_beta * 1.2
+    return beta  # Keep beta in reasonable range
+    # return base_beta
 
 
 def get_true_communities(G: nx.Graph):
@@ -153,7 +137,7 @@ def initialize_messages(
     seed: int = 0,
     group_obs=None,
     min_sep=None,
-    eps=0.2,
+    eps=0.1,
 ):
     """initialize messages for belief propagation"""
     rng = np.random.default_rng(seed)
@@ -216,7 +200,7 @@ def initialize_messages(
             if isinstance(group_obs[group], dict):
                 for rad in group_obs[group]:
                     rad_adj = np.zeros(q)
-                    rad_adj[bias_assignment[group]] = -0.2 * np.exp(rad)
+                    rad_adj[bias_assignment[group]] = max(-0.2 * np.exp(rad), -1 * bias_vector[bias_assignment[group]])
 
                     for u, v in group_obs[group][rad]:
                         messages[(int(u), int(v))] = (
@@ -258,10 +242,8 @@ def belief_propagation(
     beta: float | None = None,
     max_iter: int = 1000,
     tol: float = 1e-4,
-    damping: float = 0.3,
-    anneal_steps: int = 30,
+    damping: float = 0.2,
     balance_regularization: float = 0.1,
-    degen_threshold: float = 0.9,
     seed: int = 0,
     min_steps: int = 0,
     message_init: tuple[Literal["random", "copy", "pre-group"]] = "random",
@@ -282,11 +264,9 @@ def belief_propagation(
     )
 
     old_messages = deepcopy(messages)
-    beta_schedule = np.linspace(beta * 0.1, beta, anneal_steps)
     convergence_history = []
 
     for it in range(max_iter):
-        current_beta = beta_schedule[it] if it < anneal_steps else beta
         old_messages, messages = messages, old_messages
 
         # update beliefs
@@ -296,7 +276,7 @@ def belief_propagation(
                 s = 0.0
                 for j in G.neighbors(i):
                     msg_value = np.clip(old_messages[(j, i)][t], 1e-10, 1)
-                    s += np.log1p(np.expm1(current_beta) * msg_value)
+                    s += np.log1p(np.expm1(beta) * msg_value)
                 prod[t] = np.exp(s)
             prod /= np.clip(prod.sum(), 1e-10, None)
             G.nodes[i]["beliefs"] = prod
@@ -316,11 +296,11 @@ def belief_propagation(
             for k in neigh_i:
                 log_new = np.zeros(q)
                 for t in range(q):
-                    term1 = -current_beta * deg_i * theta[t] / (2 * m)
+                    term1 = -beta * deg_i * theta[t] / (2 * m)
                     term2 = sum(
                         np.log(
                             1
-                            + (np.exp(current_beta) - 1)
+                            + (np.exp(beta) - 1)
                             * max(1e-10, old_messages[(j, i)][t])
                         )
                         for j in neigh_i
@@ -366,32 +346,33 @@ if __name__ == "__main__":
         get_coordinate_distance,
     )
 
-    G2 = generate_gbm(n=900, K=2, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
-    # sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
-    # r_grid = np.linspace(0.1, 1.0, 12)
-    # obs, first_seen = gather_multi_sensor_observations(
-    #         G2, sensors, r_grid, seed=99, deduplicate_edges=True)
+    G2 = generate_gbm(n=900, K=3, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
     # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=10,
     #                                      num_steps=5, stopping_param=0.1,
     #                                   leaky=0.1,)
     avg_deg = np.mean([G2.degree[n] for n in G2.nodes()])
     orig_sparsity = avg_deg/len(G2.nodes)
     print("Original Sparsity:", orig_sparsity)
-    C = 0.3 * orig_sparsity
-    C = 0.001
-    num_sensors = max(int((3 * C)/(avg_deg * len(G2.nodes) * 0.1**3)), 2)
+    C = 0.1 * orig_sparsity
+    # C = 0.001
+    num_sensors = int((C * len(G2.nodes))/(0.25**3 * avg_deg))
     multi = GroupedMultiSensorObservation(
-        G2, seed=42, num_sensors=4, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
+        G2, seed=42, num_sensors=num_sensors, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
     )
-    # num_pairs = int(C * avg_deg * len(G2.nodes))
+    # num_walkers = int((C * 0.1 * len(G2.nodes) ** 2)/2)
+    # print(num_walkers)
+    # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=num_walkers,
+    #                                      num_steps=5, stopping_param=0.1,
+    #                                   leaky=0.1,)
     edges = multi.observe()
     # def weight_func(c1, c2):
     #     return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+
+    # num_pairs = int(C * len(G2.nodes) ** 2 / 2)
     print("NUM EDGES:", len(G2.edges))
     print("SAMPLINHG EDGES:", num_sensors)
     # Pair-based sampling
     # pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # print("Edges 2:", edges2)
     # observations = pair_sampler.observe()
     observations = []
     for g in edges:
@@ -418,15 +399,14 @@ if __name__ == "__main__":
     # subG = create_observed_subgraph(100, observations)``
     subG = create_observed_subgraph(len(G2.nodes), observations)
     # subG =iG2
-    initialize_beliefs(subG, 2)
+    initialize_beliefs(subG, 3)
     # messages = initialize_messages(subG, 3, "pre-group", group_obs=edges, min_sep=0.15)
     # print(messages)
     belief_propagation(
         subG,
-        q=2,
-        max_iter=2500,
-        damping=0.2,
-        anneal_steps=150,
+        q=3,
+        max_iter=5000,
+        damping=0.15,
         balance_regularization=0.05,
         min_steps=50,
         message_init="pre-group",

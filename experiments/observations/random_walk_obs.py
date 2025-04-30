@@ -39,13 +39,13 @@ def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None,
                 break  
             
             neighbor_distances = np.array([
-                distance_function(G.nodes[current_node]["coords"], G.nodes[neighbor]["coords"])
+                distance_function(np.array(G.nodes[current_node]["coords"]), np.array(G.nodes[neighbor]["coords"]))
                 for neighbor in neighbors
             ])
             neighbor_exponential = 0.5 * np.exp(-0.5 * neighbor_distances)
             neighbor_exponential /= np.sum(neighbor_exponential)
             proposed_node = int(np.random.choice(neighbors, p=neighbor_exponential))
-
+            # proposed_node = int(np.random.choice(neighbors))    
             # Metropolis-Hastings acceptance probability
             degree_current = G.degree[current_node]
             degree_proposed = G.degree[proposed_node]
