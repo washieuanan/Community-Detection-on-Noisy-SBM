@@ -1,0 +1,192 @@
+[
+    {
+        "label": "numpy",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "numpy",
+        "description": "numpy",
+        "detail": "numpy",
+        "documentation": {}
+    },
+    {
+        "label": "networkx",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "networkx",
+        "description": "networkx",
+        "detail": "networkx",
+        "documentation": {}
+    },
+    {
+        "label": "matplotlib.pyplot",
+        "kind": 6,
+        "isExtraImport": true,
+        "importPath": "matplotlib.pyplot",
+        "description": "matplotlib.pyplot",
+        "detail": "matplotlib.pyplot",
+        "documentation": {}
+    },
+    {
+        "label": "pdist",
+        "importPath": "scipy.spatial.distance",
+        "description": "scipy.spatial.distance",
+        "isExtraImport": true,
+        "detail": "scipy.spatial.distance",
+        "documentation": {}
+    },
+    {
+        "label": "squareform",
+        "importPath": "scipy.spatial.distance",
+        "description": "scipy.spatial.distance",
+        "isExtraImport": true,
+        "detail": "scipy.spatial.distance",
+        "documentation": {}
+    },
+    {
+        "label": "TSNE",
+        "importPath": "sklearn.manifold",
+        "description": "sklearn.manifold",
+        "isExtraImport": true,
+        "detail": "sklearn.manifold",
+        "documentation": {}
+    },
+    {
+        "label": "List",
+        "importPath": "typing",
+        "description": "typing",
+        "isExtraImport": true,
+        "detail": "typing",
+        "documentation": {}
+    },
+    {
+        "label": "Tuple",
+        "importPath": "typing",
+        "description": "typing",
+        "isExtraImport": true,
+        "detail": "typing",
+        "documentation": {}
+    },
+    {
+        "label": "Optional",
+        "importPath": "typing",
+        "description": "typing",
+        "isExtraImport": true,
+        "detail": "typing",
+        "documentation": {}
+    },
+    {
+        "label": "generate_latent_geometry_graph",
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "isExtraImport": true,
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "visualize_graph",
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "isExtraImport": true,
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "generate_coordinates",
+        "kind": 2,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "def generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int\n        Number of vertices to generate\n    dimension : int\n        Dimension of the space\n    distribution : str\n        Distribution to use ('uniform', 'normal', 'exponential', etc.)",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "distance_function",
+        "kind": 2,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "def distance_function(point1, point2, metric='euclidean', alpha=1.0):\n    \"\"\"\n    Calculate distance between two points with configurable metrics.\n    params: \n    point1, point2 : np.ndarray\n        Coordinates of the points\n    metric : str\n        Distance metric ('euclidean', 'manhattan', 'gaussian', etc.)\n    alpha : float\n        Parameter for certain distance functions",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "generate_latent_geometry_graph",
+        "kind": 2,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "def generate_latent_geometry_graph(\n    cluster_sizes, \n    dimension=DIMENSION, \n    connectivity_threshold=CONNECTIVITY_THRESHOLD,\n    max_attempts=MAX_ATTEMPTS,\n    distance_metric='euclidean',\n    distance_alpha=1.0,\n    distributions=None,\n    dist_params=None\n):",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "visualize_graph",
+        "kind": 2,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "def visualize_graph(G, coordinates, vertex_cluster_map):\n    \"\"\"\n    Visualize the generated graph using dimensionality reduction for n-dimensional data.\n    params: \n    G : nx.Graph\n        Generated graph\n    coordinates : np.ndarray\n        Array with coordinates of each vertex (can be n-dimensional)\n    vertex_cluster_map : list\n        List indicating which cluster each vertex belongs to",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "NUM_VERTICES_CLUSTER_1",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "NUM_VERTICES_CLUSTER_1 = 100\nNUM_VERTICES_CLUSTER_2 = 200\nTOTAL_VERTICES = NUM_VERTICES_CLUSTER_1 + NUM_VERTICES_CLUSTER_2\nDIMENSION = 3  \nCONNECTIVITY_THRESHOLD = 0.3  \nMAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: ",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "NUM_VERTICES_CLUSTER_2",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "NUM_VERTICES_CLUSTER_2 = 200\nTOTAL_VERTICES = NUM_VERTICES_CLUSTER_1 + NUM_VERTICES_CLUSTER_2\nDIMENSION = 3  \nCONNECTIVITY_THRESHOLD = 0.3  \nMAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "TOTAL_VERTICES",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "TOTAL_VERTICES = NUM_VERTICES_CLUSTER_1 + NUM_VERTICES_CLUSTER_2\nDIMENSION = 3  \nCONNECTIVITY_THRESHOLD = 0.3  \nMAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int\n        Number of vertices to generate",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "DIMENSION",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "DIMENSION = 3  \nCONNECTIVITY_THRESHOLD = 0.3  \nMAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int\n        Number of vertices to generate\n    dimension : int",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "CONNECTIVITY_THRESHOLD",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "CONNECTIVITY_THRESHOLD = 0.3  \nMAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int\n        Number of vertices to generate\n    dimension : int\n        Dimension of the space",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "MAX_ATTEMPTS",
+        "kind": 5,
+        "importPath": "generate_graph",
+        "description": "generate_graph",
+        "peekOfCode": "MAX_ATTEMPTS = 10 \ndef generate_coordinates(num_vertices, dimension, distribution='uniform', **kwargs):\n    \"\"\"\n    Generate coordinates in R^n space based on specified distribution.\n    params: \n    num_vertices : int\n        Number of vertices to generate\n    dimension : int\n        Dimension of the space\n    distribution : str",
+        "detail": "generate_graph",
+        "documentation": {}
+    },
+    {
+        "label": "sample_edge_pairs",
+        "kind": 2,
+        "importPath": "observe",
+        "description": "observe",
+        "peekOfCode": "def sample_edge_pairs(G: nx.Graph, num_pairs: int, seed: Optional[int] = None) -> List[Tuple[int, int]]:\n    \"\"\"\n    Uniformly sample pairs of edges from a graph G.\n    Parameters:\n    -----------\n    G : nx.Graph\n        The input graph\n    num_pairs : int\n        Number of edge pairs to sample\n    seed : Optional[int]",
+        "detail": "observe",
+        "documentation": {}
+    }
+]
