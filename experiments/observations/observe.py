@@ -15,12 +15,12 @@ class Observation(ABC):
         self.observations = []
 
     @abstractmethod
-    def observe(self) -> List[Tuple[any, any]]:
+    def observe(self):
         '''
         Perform observation on the graph. Must return a list of node-pair observations. 
 
         Returns: 
     
-        List of tuples, each representing an observed edge or interaction, e.g. [(u,v), ...]
+        something
         '''
         raise NotImplementedError("Subclasses must implement the observe method")

@@ -7,13 +7,12 @@ def discard_disconnected_nodes(G):
     disconnected_nodes = [node for node in G.nodes() if G.degree(node) == 0]
     G.remove_nodes_from(disconnected_nodes)
 
-def generate_gbm(n: int, 
+def generate_gbm(n: int,
                  K: int,
-                 r_in: float, 
-                 r_out: float, 
-                 p_in: float,
-                 p_out: float, 
-                 seed: int | None):
+                 a: int, 
+                 b: int,
+                 dim: int = 2,
+                 seed: int | None = None):
 
     '''
     generate GBM (cursor autocomplete limit gone so back to handwriting docstirng sadge)
@@ -29,28 +28,27 @@ def generate_gbm(n: int,
     seed (int or None): Random seed for reproducability 
     '''
 
+    if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
+        raise ValueError("Pick a and b s.t. sqrt(a) - sqrt(b) > 2 * sqrt(2)")
+
+    r_in = a * np.log(n) / n
+    r_out = b * np.log(n) / n
+    p_in = a * np.log(n) / n
+    p_out = b * np.log(n) / n
+
+
     rng = np.random.default_rng(seed) # not used
-    pts = np.empty((n, 2)) 
+    pts = np.empty((n, dim)) 
 
     i = 0
 
     while i < n: 
-        x,y = rng.uniform(-1, 1), rng.uniform(-1,1)
-        # "uniform for some reason" - g. liu
-        #
-        # i think its just the easiest way to get each node's position iid
-        # with same area density everywhere in the u.c. because GBM assumes
-        # uniform dist over \{(x,y) : x^2 + y^2 \leq 1}
-        #
-        # We can do this using polar coordinates where x = r cos(theta) and y = r sin(theta) 
-        # and then the jacobian should give us r dr dtheta which will be constant density as well 
-        #
-        # the way ima just do this is sample (x,y) ~ Uniform([-1,1]^2) and if x^2 + y^2 > 1, resample
-        # o.w. keep (x,y)
+        candidate = rng.uniform(-1, 1, dim)
 
-        if x*x + y*y <= 1: 
-            pts[i] = [x,y]
-            i += 1 
+        if np.linalg.norm(candidate) <= 1:
+            pts[i] = candidate
+            i += 1
+
 
     # assign communities uniformly
     comm = rng.integers(0, K, size = n) 
@@ -73,18 +71,19 @@ def generate_gbm(n: int,
 def generate_gbm_soft_threshold(n: int, 
                                 K: int, 
                                 Q: np.array, 
-                                kernel: callable, 
-                                seed: int | None): 
+                                kernel: callable,
+                                dim: int = 2,
+                                seed: int | None = None): 
     
     rng = np.random.default_rng(seed) 
-    pts = np.empty((n,2)) 
+    pts = np.empty((n,dim)) 
     
     i = 0 
     while i < n: 
-        x,y = rng.uniform(-1,1,2) 
-        if x*x + y*y <= 1:
-            pts[i] = [x,y] 
-            i += 1 
+        candidate = rng.uniform(-1, 1, dim)
+        if np.linalg.norm(candidate) <= 1: 
+            pts[i] = candidate
+            i += 1
 
     comm = rng.integers(0, K, size = n) 
     G = nx.Graph() 
@@ -200,11 +199,10 @@ if __name__ == "__main__":
     G = generate_gbm(
         n=500,
         K=2,
-        r_in=0.2,
-        r_out=0.1,
-        p_in=0.9,
-        p_out=0.1,
+        a = 100, 
+        b = 50,
         seed=123
     )
 
+    
     plot_gbm(G, node_size = 30, edge_alpha= 0.3)

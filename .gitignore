@@ -1,2 +1,3 @@
 stochastic/
-*/amazon-meta.txt
+
+*.json

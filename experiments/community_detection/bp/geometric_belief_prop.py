@@ -1,3 +1,4 @@
+
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -7,8 +8,6 @@ from scipy.stats import chi2_contingency, permutation_test, mode
 from sklearn.metrics import accuracy_score, confusion_matrix
 import scipy.sparse.linalg as sla
 from sklearn.cluster import KMeans
-
-
 
 # no longer needed
 def get_sbm(
@@ -64,7 +63,6 @@ def calc_beta_param(G: nx.Graph, num_communities: int):
     print("Graph Density:", density)
     beta = base_beta * 1.2
     return beta  # Keep beta in reasonable range
-    # return base_beta
 
 
 def get_true_communities(G: nx.Graph):
@@ -82,7 +80,7 @@ def detection_stats(preds, true):
         true_grouping[comm] = np.where(true == comm)[0]
         pred_grouping[comm] = np.where(preds == comm)[0]
 
-    # get permuation of pred_groupings that most closely matches true_groupings
+    # get permutation of pred_groupings that most closely matches true_groupings
     perm = np.zeros(num_communities)
     available_comms = {c for c in range(num_communities)}
     sorted_pred_grouping = sorted(
@@ -257,13 +255,23 @@ def belief_propagation(
     deg = dict(G.degree())
     c = np.mean(list(deg.values()))
 
+    # --- original beta logic ---
     if beta is None:
         beta = calc_beta_param(G, q) * 1.1
 
+    # --- NEW: build geometry weights for every directed edge ---
+    gamma = 1.0  # repulsion strength; tune as needed
+    geo_w = {}
+    for u, v in G.edges():
+        d = np.linalg.norm(G.nodes[u]['coord'] - G.nodes[v]['coord'])
+        w = np.exp(-gamma * d)
+        geo_w[(u, v)] = w
+        geo_w[(v, u)] = w
+
+    # initialize messages
     messages = initialize_messages(
         G, q, message_init, seed=seed, group_obs=group_obs, min_sep=min_sep
     )
-
     old_messages = deepcopy(messages)
     convergence_history = []
 
@@ -298,10 +306,11 @@ def belief_propagation(
                 log_new = np.zeros(q)
                 for t in range(q):
                     term1 = -beta * deg_i * theta[t] / (2 * m)
+                    # --- incorporate geometry weight on beta ---
                     term2 = sum(
                         np.log(
                             1
-                            + (np.exp(beta) - 1)
+                            + (np.exp(beta * geo_w[(j, i)]) - 1)
                             * max(1e-10, old_messages[(j, i)][t])
                         )
                         for j in neigh_i
@@ -339,89 +348,3 @@ def belief_propagation(
 
 if __name__ == "__main__":
     pass
-    # from experiments.observations.sensor_observe import GroupedMultiSensorObservation
-    # from experiments.graph_generation.gbm import generate_gbm
-    # from experiments.community_detection.bp.gbm_bp import create_observed_subgraph
-    # from experiments.observations.random_walk_obs import GroupedRandomWalkObservation
-    # from experiments.observations.standard_observe import (
-    #     PairSamplingObservation,
-    #     get_coordinate_distance,
-    # )
-
-    # G2 = generate_gbm(n=900, K=3, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
-    # # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=10,
-    # #                                      num_steps=5, stopping_param=0.1,
-    # #                                   leaky=0.1,)
-    # avg_deg = np.mean([G2.degree[n] for n in G2.nodes()])
-    # orig_sparsity = avg_deg/len(G2.nodes)
-    # print("Original Sparsity:", orig_sparsity)
-    # C = 0.1 * orig_sparsity
-    # # C = 0.001
-    # num_sensors = int((C * len(G2.nodes))/(0.25**3 * avg_deg))
-    # multi = GroupedMultiSensorObservation(
-    #     G2, seed=42, num_sensors=num_sensors, radii=np.linspace(0.1, 1.0, 10), min_sep=0.15
-    # )
-    # # num_walkers = int((C * 0.1 * len(G2.nodes) ** 2)/2)
-    # # print(num_walkers)
-    # # multi = GroupedRandomWalkObservation(graph=G2, seed=123, num_walkers=num_walkers,
-    # #                                      num_steps=5, stopping_param=0.1,
-    # #                                   leaky=0.1,)
-    # edges = multi.observe()
-    # # def weight_func(c1, c2):
-    # #     return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-
-    # # num_pairs = int(C * len(G2.nodes) ** 2 / 2)
-    # print("NUM EDGES:", len(G2.edges))
-    # print("SAMPLINHG EDGES:", num_sensors)
-    # # Pair-based sampling
-    # # pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # # observations = pair_sampler.observe()
-    # observations = []
-    # for g in edges:
-    #     for r, obs in g.items():
-    #         for u, v in obs:
-    #             observations.append((u, v))
-    # # for g in edges:
-    # #     for u, v in g:
-    # #         observations.append((u, v))
-
-    # # New approach - get all unique edges across all radii
-    # # unique_edges = get_unique_edges(obs)
-
-    # # Print counts to compare
-    # print(f"Total observations (may include duplicates): {len(observations)}")
-    # # print(f"Unique edges: {len(unique_edges)}")
-
-    # observed_nodes = set()
-    # for u, v in observations:
-    #     observed_nodes.add(u)
-    #     observed_nodes.add(v)
-    # # print(observations)
-
-    # # subG = create_observed_subgraph(100, observations)``
-    # subG = create_observed_subgraph(len(G2.nodes), observations)
-    # # subG =iG2
-    # initialize_beliefs(subG, 3)
-    # # messages = initialize_messages(subG, 3, "pre-group", group_obs=edges, min_sep=0.15)
-    # # print(messages)
-    # belief_propagation(
-    #     subG,
-    #     q=3,
-    #     max_iter=5000,
-    #     damping=0.15,
-    #     balance_regularization=0.05,
-    #     min_steps=50,
-    #     message_init="pre-group",
-    #     group_obs=edges,
-    #     min_sep=0.15,
-    # )
-    # marginals, preds = get_marginals_and_preds(subG)
-    # # cluster_map = np.array(cluster_map2)
-    # cluster_map = nx.get_node_attributes(G2, "comm")
-    # cluster_map = np.array(list(cluster_map.values()))
-    # sub_preds = np.array([preds[i] for i in range(len(preds)) if i in observed_nodes])
-    # sub_cluster_map = np.array(
-    #     [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
-    # )
-    # print(detection_stats(preds, cluster_map))
-    # print(detection_stats(sub_preds, sub_cluster_map))
