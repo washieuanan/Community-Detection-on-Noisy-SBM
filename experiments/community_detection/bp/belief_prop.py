@@ -8,6 +8,8 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 import scipy.sparse.linalg as sla
 from sklearn.cluster import KMeans
 
+
+
 # no longer needed
 def get_sbm(
     num_nodes: int,
