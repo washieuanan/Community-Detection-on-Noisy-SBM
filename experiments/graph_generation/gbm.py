@@ -11,7 +11,8 @@ def generate_gbm(n: int,
                  K: int,
                  a: int, 
                  b: int,
-                 seed: int | None):
+                 dim: int = 2,
+                 seed: int | None = None):
 
     '''
     generate GBM (cursor autocomplete limit gone so back to handwriting docstirng sadge)
@@ -37,27 +38,17 @@ def generate_gbm(n: int,
 
 
     rng = np.random.default_rng(seed) # not used
-    pts = np.empty((n, 2)) 
+    pts = np.empty((n, dim)) 
 
     i = 0
 
     while i < n: 
-        x,y = rng.uniform(-1, 1), rng.uniform(-1,1)
-        # "uniform for some reason" - g. liu
-        #
-        # i think its just the easiest way to get each node's position iid
-        # with same area density everywhere in the u.c. because GBM assumes
-        # uniform dist over \{(x,y) : x^2 + y^2 \leq 1}
-        #
-        # We can do this using polar coordinates where x = r cos(theta) and y = r sin(theta) 
-        # and then the jacobian should give us r dr dtheta which will be constant density as well 
-        #
-        # the way ima just do this is sample (x,y) ~ Uniform([-1,1]^2) and if x^2 + y^2 > 1, resample
-        # o.w. keep (x,y)
+        candidate = rng.uniform(-1, 1, dim)
 
-        if x*x + y*y <= 1: 
-            pts[i] = [x,y]
-            i += 1 
+        if np.linalg.norm(candidate) <= 1:
+            pts[i] = candidate
+            i += 1
+
 
     # assign communities uniformly
     comm = rng.integers(0, K, size = n) 
@@ -80,18 +71,19 @@ def generate_gbm(n: int,
 def generate_gbm_soft_threshold(n: int, 
                                 K: int, 
                                 Q: np.array, 
-                                kernel: callable, 
-                                seed: int | None): 
+                                kernel: callable,
+                                dim: int = 2,
+                                seed: int | None = None): 
     
     rng = np.random.default_rng(seed) 
-    pts = np.empty((n,2)) 
+    pts = np.empty((n,dim)) 
     
     i = 0 
     while i < n: 
-        x,y = rng.uniform(-1,1,2) 
-        if x*x + y*y <= 1:
-            pts[i] = [x,y] 
-            i += 1 
+        candidate = rng.uniform(-1, 1, dim)
+        if np.linalg.norm(candidate) <= 1: 
+            pts[i] = candidate
+            i += 1
 
     comm = rng.integers(0, K, size = n) 
     G = nx.Graph() 
