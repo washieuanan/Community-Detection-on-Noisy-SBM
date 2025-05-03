@@ -200,15 +200,20 @@ class BayesianGraphInference():
         return G
     
 if __name__ == "__main__":
+
     from graph_generation.gbm import generate_gbm
     import numpy as np
+
+
     from mpl_toolkits.mplot3d import Axes3D
+
+
     from observations.standard_observe import (
         PairSamplingObservation,
         get_coordinate_distance,
     )
-    from observations.sensor_observe import GroupedMultiSensorObservation
 
+    from observations.sensor_observe import GroupedMultiSensorObservation
     from community_detection.bp.vectorized_geometric_bp import detection_stats, belief_propagation, get_true_communities
     from community_detection.bp.gbm_bp import (create_observed_subgraph)
 
