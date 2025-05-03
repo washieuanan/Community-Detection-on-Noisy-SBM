@@ -11,6 +11,13 @@ import glob
 import concurrent.futures
 
 
+import multiprocessing
+
+n_cpus = multiprocessing.cpu_count()
+os.environ['OPENBLAS_NUM_THREADS'] = str(n_cpus)
+os.environ['MKL_NUM_THREADS']      = str(n_cpus)
+os.environ['OMP_NUM_THREADS']      = str(n_cpus)
+
 
 warnings.filterwarnings("ignore", category=UserWarning, module='networkx')
 
@@ -209,61 +216,44 @@ def process_file(input_path: str, output_dir: str) -> None:
         print(f"❌ Error processing {os.path.basename(input_path)}: {str(e)}")
 
 
-import concurrent.futures
+
+
 import os
 import glob
+import concurrent.futures
+
 
 def main():
-    # Paths
-    bp_results_dir = 'results/bp_05_01_results/01'
-    input_dir       = 'datasets/observations_generation/gbm_observation_01'
-    output_dir      = 'results/bayes_bp_05_02_results/01'
-    
+    input_dir  = 'datasets/observations_generation/gbm_observation_01'
+    output_dir = 'results/bayes_bp_05_02_results/01'
+
     os.makedirs(output_dir, exist_ok=True)
     print(f"✅ Output directory created/verified: {output_dir}")
 
-    # Find which graphs we already have BP results for
-    result_files = glob.glob(os.path.join(bp_results_dir, 'graph_*_results.json'))
-    graph_numbers = []
-    for result_file in result_files:
-        base = os.path.basename(result_file)
-        if base.startswith('graph_') and base.endswith('_results.json'):
-            try:
-                num = int(base.replace('graph_', '').replace('_results.json', ''))
-                graph_numbers.append(num)
-            except ValueError:
-                print(f"⚠️  Could not parse graph number from {base}")
-    graph_numbers.sort()
-    print(f"Found {len(graph_numbers)} graph results in {bp_results_dir}")
+    # Grab every .json in input_dir
+    input_paths = sorted(glob.glob(os.path.join(input_dir, '*.json')))
+    print(f"→ Found {len(input_paths)} JSON files to process.")
 
-    # Build list of input paths to process
-    input_paths = [
-        os.path.join(input_dir, f'graph_{num:03d}.json')
-        for num in graph_numbers
-        if os.path.exists(os.path.join(input_dir, f'graph_{num:03d}.json'))
-    ]
+    for path in input_paths:
+        base = os.path.basename(path)
+        print(f"\n--- Processing {base} ---")
+        try:
+            process_file(path, output_dir)
+        except Exception as e:
+            print(f"❌ Error processing {base}: {e}")
 
-    print(f"Scheduling {len(input_paths)} files for parallel processing...")
+    print("\n✅ All processing completed!")
 
-    num_workers = 12
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Kick off all tasks
-        futures = {
-            executor.submit(process_file, path, output_dir): path
-            for path in input_paths
-        }
-        # As each one finishes, report any unexpected exception
-        for fut in concurrent.futures.as_completed(futures):
-            path = futures[fut]
-            try:
-                fut.result()
-            except Exception as e:
-                print(f"❌ Unexpected error in {os.path.basename(path)}: {e}")
 
-    print("✅ All processing completed!")
+
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
 
 
 # def main():
