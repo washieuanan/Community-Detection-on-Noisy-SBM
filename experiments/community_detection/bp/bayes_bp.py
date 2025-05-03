@@ -207,8 +207,9 @@ if __name__ == "__main__":
         PairSamplingObservation,
         get_coordinate_distance,
     )
+    from observations.sensor_observe import GroupedMultiSensorObservation
 
-    from community_detection.bp.belief_prop import (
+    from community_detection.bp.geometric_belief_prop import (
         detection_stats,
         initialize_beliefs,
         belief_propagation,
@@ -225,19 +226,42 @@ if __name__ == "__main__":
     num_pairs = int(C * len(G2.nodes) ** 2 / 2)
     print("NUM EDGES:", len(G2.edges))
     print("SAMPLINHG EDGES:", num_pairs)
+
+    avg_degree = np.mean(list(dict(G2.degree()).values()))
+    original_density = avg_degree / len(G2.nodes)
+    C = 0.1 * original_density 
+    num_sensors = max(1, int((C * len(G2.nodes)) / ((0.25)**3 * avg_degree)))
+
+
     # Pair-based sampling
-    pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    observations = pair_sampler.observe()
+    # pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    grouped_multi_sensor_sampler = GroupedMultiSensorObservation(G2, 
+                                                                 seed = 42,
+                                                                 num_sensors=num_sensors, 
+                                                                 min_sep=0.2, 
+                                                                 radii=np.linspace(0.1, 1.0, 10),
+                                                                 deduplicate_edges=True)
+    observations = grouped_multi_sensor_sampler.observe()
     observed_nodes = set()
-    for u, v in observations:
-        observed_nodes.add(u)
-        observed_nodes.add(v)
+    
+
+    # for group ms 
+    for sensor_obs in observations:   
+        for k,v in sensor_obs.items(): 
+            for obs in v: 
+                observed_nodes.add(obs[0])
+                observed_nodes.add(obs[1])
+    
+    
+    # for u, v in observations:
+    #     observed_nodes.add(u)
+    #     observed_nodes.add(v)
 
     bayes = BayesianGraphInference(
         observations=observations,
         observed_nodes=observed_nodes,
         total_nodes=len(G2.nodes),
-        obs_format='base',
+        obs_format='GMS',
         n_candidates=2**20
     )
     
@@ -321,8 +345,8 @@ if __name__ == "__main__":
         damping=0.15,
         balance_regularization=0.05,
         min_steps=50,
-        message_init="random",
-        group_obs=None,
+        message_init="pre-group",
+        group_obs=observations,
         min_sep=0.15,
     )
     # marginals, preds = get_marginals_and_preds(pred_graph)
