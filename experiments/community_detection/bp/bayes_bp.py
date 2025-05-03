@@ -200,34 +200,48 @@ class BayesianGraphInference():
         return G
     
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
+
+    from graph_generation.gbm import generate_gbm
     import numpy as np
+
+
     from mpl_toolkits.mplot3d import Axes3D
-    from experiments.observations.standard_observe import (
+
+
+    from observations.standard_observe import (
         PairSamplingObservation,
         get_coordinate_distance,
     )
-    from experiments.community_detection.bp.belief_prop import (
-        detection_stats,
-        initialize_beliefs,
-        belief_propagation,
-        get_marginals_and_preds,)
-    from experiments.community_detection.bp.gbm_bp import (create_observed_subgraph)
-    G2 = generate_gbm(n=500, K=2, r_in=0.25, r_out=0.1, p_in=0.7, p_out=0.2, seed=123)
+
+    from observations.sensor_observe import GroupedMultiSensorObservation
+    from community_detection.bp.vectorized_geometric_bp import detection_stats, belief_propagation, get_true_communities
+    from community_detection.bp.gbm_bp import (create_observed_subgraph)
+
+
+    G2 = generate_gbm(n=500, K=3, a = 100, b = 50, seed=123)
     avg_deg = np.mean([G2.degree[n] for n in G2.nodes()])
     orig_sparsity = avg_deg/len(G2.nodes)
     print("Original Sparsity:", orig_sparsity)
-    C = 0.25 * orig_sparsity                      
+    C = 0.15 * orig_sparsity                      
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
 
     num_pairs = int(C * len(G2.nodes) ** 2 / 2)
     print("NUM EDGES:", len(G2.edges))
     print("SAMPLINHG EDGES:", num_pairs)
+
+    avg_degree = np.mean(list(dict(G2.degree()).values()))
+    original_density = avg_degree / len(G2.nodes)
+    C = 0.1 * original_density 
+    num_sensors = max(1, int((C * len(G2.nodes)) / ((0.25)**3 * avg_degree)))
+
+
     # Pair-based sampling
     pair_sampler = PairSamplingObservation(G2, num_samples=num_pairs, weight_func=weight_func, seed=42)
     observations = pair_sampler.observe()
     observed_nodes = set()
+    
+
     for u, v in observations:
         observed_nodes.add(u)
         observed_nodes.add(v)
@@ -241,85 +255,93 @@ if __name__ == "__main__":
     )
     
     pred_graph = bayes.infer()
-    # import matplotlib.pyplot as plt
-
-    # fig = plt.figure(figsize=(8, 8))
-    # ax = fig.add_subplot(111, projection='3d')
-
-    # # Plot a unit sphere
-    # phi = np.linspace(0, np.pi, 50)
-    # theta = np.linspace(0, 2 * np.pi, 50)
-    # phi, theta = np.meshgrid(phi, theta)
-    # x_sphere = np.sin(phi) * np.cos(theta)
-    # y_sphere = np.sin(phi) * np.sin(theta)
-    # z_sphere = np.cos(phi)
-    # ax.plot_surface(x_sphere, y_sphere, z_sphere, color='lightblue', alpha=0.3, linewidth=0)
-
-    # # Plot graph nodes
-    # node_coords = np.array([pred_graph.nodes[n]['coord'] for n in pred_graph.nodes])
-    # xs, ys, zs = node_coords[:, 0], node_coords[:, 1], node_coords[:, 2]
-    # ax.scatter(xs, ys, zs, color='red', s=50)
-
-    # # Plot graph edges
-    # for u, v in pred_graph.edges():
-    #     coord_u = np.array(pred_graph.nodes[u]['coord'])
-    #     coord_v = np.array(pred_graph.nodes[v]['coord'])
-    #     ax.plot([coord_u[0], coord_v[0]],
-    #             [coord_u[1], coord_v[1]],
-    #             [coord_u[2], coord_v[2]],
-    #             color='grey', alpha=0.5)
-
-    # ax.set_xlim([-1.2, 1.2])
-    # ax.set_ylim([-1.2, 1.2])
-    # ax.set_zlim([-1.2, 1.2])
-    # ax.set_xlabel('X')
-    # ax.set_ylabel('Y')
-    # ax.set_zlabel('Z')
-    # ax.set_title('Inferred Graph on Unit Sphere')
-    # plt.show()
     subG = create_observed_subgraph(len(G2.nodes), observations)
-    # # subG =iG2
-    initialize_beliefs(pred_graph, 2)
-    initialize_beliefs(subG, 2)
-    belief_propagation(
-        pred_graph,
-        q=2,
-        max_iter=5000,
-        damping=0.15,
-        balance_regularization=0.05,
-        min_steps=50,
-        message_init="random",
-        group_obs=None,
-        min_sep=0.15,
-    )
-    belief_propagation(
-        subG,
-        q=2,
-        max_iter=5000,
-        damping=0.15,
-        balance_regularization=0.05,
-        min_steps=50,
-        message_init="random",
-        group_obs=None,
-        min_sep=0.15,
-    )
-    marginals, preds = get_marginals_and_preds(pred_graph)
-    # cluster_map = np.array(cluster_map2)
-    cluster_map = nx.get_node_attributes(G2, "comm")
-    cluster_map = np.array(list(cluster_map.values()))
-    sub_preds = np.array([preds[i] for i in range(len(preds)) if i in observed_nodes])
-    sub_cluster_map = np.array(
-        [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
-    )
-    print(detection_stats(preds, cluster_map))
-    print(detection_stats(sub_preds, sub_cluster_map))
+
     
-    submarginals_fuck, sub_preds_fuck = get_marginals_and_preds(subG)
-    # cluster_map = np.array(cluster_map2)
-    sub_preds_subG = np.array([sub_preds_fuck[i] for i in range(len(sub_preds_fuck)) if i in observed_nodes])
-    sub_cluster_map_subG = np.array(
-        [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
+    for n in subG.nodes():
+        subG.nodes[n]['coord'] = pred_graph.nodes[n]['coord']
+
+
+    gamma = 1.0       
+    K = 2             
+
+    for G in (pred_graph, subG):
+        for u, v in G.edges():
+            # Euclidean distance in latent space
+            d = np.linalg.norm(pred_graph.nodes[u]['coord'] - pred_graph.nodes[v]['coord'])
+            # start with no effect off-diagonal, repulsive on the diagonal
+            psi = np.ones((K, K))
+            np.fill_diagonal(psi, np.exp(-gamma * d))
+            # store it on the edge
+            G[u][v]['psi'] = psi
+
+    # # subG =iG2
+    # initialize_beliefs(pred_graph, 2)
+    # initialize_beliefs(subG, 3)
+    # belief_propagation(
+    #     pred_graph,
+    #     q=2,
+    #     max_iter=5000,
+    #     damping=0.15,
+    #     balance_regularization=0.05,
+    #     min_steps=50,
+    #     message_init="random",
+    #     group_obs=None,
+    #     min_sep=0.15,
+    # )
+    # belief_propagation(
+    #     subG,
+    #     q=3,
+    #     max_iter=5000,
+    #     damping=0.15,
+    #     balance_regularization=0.05,
+    #     min_steps=50,
+    #     message_init="pre-group",
+    #     group_obs=observations,
+    #     min_sep=0.15,
+    # )
+
+    print("RUNNING BELIEF PROP")
+    # time it 
+    import time
+    start = time.time()
+    beliefs, preds, node2idx, idx2node = belief_propagation(
+        subG, 
+        q = 3, 
+        seed = 42, 
+        init_beliefs="spectral",
+        message_init="random", 
+        max_iter=5000, 
+        damping=0.15, 
+        balance_regularization=0.05,
     )
-    print(detection_stats(sub_preds_fuck, cluster_map))
-    print(detection_stats(sub_preds_subG, sub_cluster_map_subG))
+    end = time.time()
+    print("Time taken for BP:", end - start)
+
+    true_labels = get_true_communities(G2, node2idx=node2idx, attr="comm") 
+    full_stats = detection_stats(preds, true_labels)
+
+    print("\n=== Community‑detection accuracy (all nodes) ===")
+    for k, v in full_stats.items():
+        print(f"{k:>25s} : {v}")
+
+    # # marginals, preds = get_marginals_and_preds(pred_graph)
+    # # cluster_map = np.array(cluster_map2)
+    # cluster_map = nx.get_node_attributes(G2, "comm")
+    # cluster_map = np.array(list(cluster_map.values()))
+    # # sub_preds = np.array([preds[i] for i in range(len(preds)) if i in observed_nodes])
+    # # sub_cluster_map = np.array(
+    # #     [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
+    # # )
+    # # print(detection_stats(preds, cluster_map))
+    # # print(detection_stats(sub_preds, sub_cluster_map))
+    
+    # submarginals_fuck, sub_preds_fuck = get_marginals_and_preds(subG)
+    # # cluster_map = np.array(cluster_map2)
+    # sub_preds_subG = np.array([sub_preds_fuck[i] for i in range(len(sub_preds_fuck)) if i in observed_nodes])
+    # sub_cluster_map_subG = np.array(
+    #     [cluster_map[i] for i in range(len(cluster_map)) if i in observed_nodes]
+    # )
+    # print(detection_stats(sub_preds_fuck, cluster_map))
+    # print(detection_stats(sub_preds_subG, sub_cluster_map_subG))
     

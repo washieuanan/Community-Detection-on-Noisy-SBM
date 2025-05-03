@@ -1,6 +1,6 @@
 # imports 
-import experiments
-from experiments.community_detection.bp.belief_prop import (
+
+from community_detection.bp.belief_prop import (
     detection_stats,
     initialize_beliefs,
     get_marginals_and_preds,
@@ -9,7 +9,7 @@ from experiments.community_detection.bp.belief_prop import (
     get_true_communities
 )
 
-from experiments.graph_generation.generate_graph import (
+from graph_generation.generate_graph import (
     generate_latent_geometry_graph,
     NUM_VERTICES_CLUSTER_1,
     NUM_VERTICES_CLUSTER_2,
@@ -19,8 +19,8 @@ from experiments.graph_generation.generate_graph import (
 import numpy as np
 import networkx as nx
 
-from experiments.observations.random_walk_obs import random_walk_observations
-from experiments.observations.sensor_observe import sensor_observations, gather_multi_sensor_observations, pick_sensors
+from observations.random_walk_obs import random_walk_observations
+from observations.sensor_observe import sensor_observations, gather_multi_sensor_observations, pick_sensors
 
 def get_unique_edges(obs):
     """
@@ -97,10 +97,8 @@ if __name__ == "__main__":
     G2 = generate_gbm(
         n=300,
         K=3,
-        r_in=0.25,
-        r_out=0.05,
-        p_in=0.9,
-        p_out=0.2,
+        a = 100, 
+        b = 50,
         seed=123
     )
     sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
@@ -135,7 +133,6 @@ if __name__ == "__main__":
         q=3, 
         max_iter=1000,
         damping=0.2,
-        anneal_steps=150,    
         balance_regularization=0.1,
         min_steps=50,
     )

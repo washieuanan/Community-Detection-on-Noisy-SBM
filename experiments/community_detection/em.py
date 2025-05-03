@@ -174,8 +174,7 @@ class LatentSpaceEMDetection(Detection):
         dim: int = 2,
         max_iter: int = 20
     ):
-        super().__init__(graph, observations)
-        self.K = K
+        super().__init__(graph, observations, K)
         self.dim = dim
         self.max_iter = max_iter
 
@@ -186,7 +185,7 @@ class LatentSpaceEMDetection(Detection):
         results = latent_space_em(
             self.graph,
             self.observations,
-            self.K,
+            self.k,
             dim=self.dim,
             max_iter=self.max_iter
         )
@@ -267,7 +266,7 @@ def eval_em_accuracy(nodes, q, G):
 
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
+    from graph_generation.gbm import generate_gbm
     # distributions = ['normal', 'normal', 'normal']
     # dist_params = [
     #     {'loc':[-0.3, 0.1, 0.3], 'scale':0.2, 'constrain_to_unit_sphere':True},
@@ -291,16 +290,14 @@ if __name__ == "__main__":
     G2 = generate_gbm(
         n=300,
         K=3,
-        r_in=0.25,
-        r_out=0.05,
-        p_in=0.9,
-        p_out=0.2,
+        a = 100, 
+        b = 50,
         seed=123
     )
 
     observations = random_walk_observations(G2, num_walkers=8, stopping_param=0.2, leaky=0.1)
 
-    em_results = latent_space_em(G2, observations, 3, dim=2, max_iter=20)
+    em_results = latent_space_em(G2, observations, 3, dim=2, max_iter=1000)
     print(em_results)
     print(eval_em_accuracy(em_results['nodes'], em_results['q'], G2))
 
