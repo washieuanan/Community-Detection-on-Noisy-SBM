@@ -97,10 +97,8 @@ if __name__ == "__main__":
     G2 = generate_gbm(
         n=300,
         K=3,
-        r_in=0.25,
-        r_out=0.05,
-        p_in=0.9,
-        p_out=0.2,
+        a = 100, 
+        b = 50,
         seed=123
     )
     sensors = pick_sensors(G2, num_sensors=5, min_sep=0.10, seed=99)
@@ -135,7 +133,6 @@ if __name__ == "__main__":
         q=3, 
         max_iter=1000,
         damping=0.2,
-        anneal_steps=150,    
         balance_regularization=0.1,
         min_steps=50,
     )
