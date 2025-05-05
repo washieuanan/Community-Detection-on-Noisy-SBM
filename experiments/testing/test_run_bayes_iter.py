@@ -145,6 +145,7 @@ def process_file(input_path: str, output_dir: str) -> None:
             # Build observed subgraph and initialize beliefs
             subG = create_observed_subgraph(len(G.nodes()), observations)
 
+            print(" used here:")
             for n in subG.nodes(): 
                 subG.nodes[n]['coord'] = predicted_graph.nodes[n]['coord']
 
@@ -218,8 +219,8 @@ def process_file(input_path: str, output_dir: str) -> None:
 
 
 def main():
-    input_dir  = 'datasets/observations_generation/gbm_observation_025'
-    output_dir = 'results/bayes_bp_05_03_results/025'
+    input_dir  = 'datasets/observations_generation/gbm_observation_005'
+    output_dir = 'results/bayes_bp_05_05_results/005'
 
     os.makedirs(output_dir, exist_ok=True)
     print(f"✅ Output directory created/verified: {output_dir}")
