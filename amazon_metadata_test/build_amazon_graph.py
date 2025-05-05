@@ -6,7 +6,6 @@ from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.decomposition import TruncatedSVD
 import umap
 
-# Optional: Dask-ML for parallel SVD
 try:
     import dask.array as da
     from dask_ml.decomposition import TruncatedSVD as DaskSVD
@@ -14,21 +13,18 @@ try:
 except ImportError:
     _HAS_DASK = False
 
-# Optional: Landmark MDS (install via `pip install lmds`)
 try:
     from lmds import LandmarkMDS
     _HAS_LMDS = True
 except ImportError:
     _HAS_LMDS = False
 
-# Optional: node2vec embeddings (install via `pip install nodevectors`)
 try:
     from nodevectors import Node2Vec
     _HAS_NODE2VEC = True
 except ImportError:
     _HAS_NODE2VEC = False
 
-# Optional: MinHash LSH (install via `pip install datasketch`)
 try:
     from datasketch import MinHash, MinHashLSH
     _HAS_MINHASH = True
@@ -44,17 +40,14 @@ def _preprocess(products):
     """
     G = nx.Graph()
 
-    # 1. Filter out discontinued products
     valid = {
         asin: info
         for asin, info in products.items()
         if not (
-            info.get('discontinued', False)
-            or info.get('status', '').lower() == 'discontinued product'
+            info.get('group', None) is None
         )
     }
 
-    # 2. Assign numeric IDs and add nodes
     asins = list(valid.keys())
     node_ids = list(range(len(asins)))
     for idx, asin in zip(node_ids, asins):
@@ -64,7 +57,6 @@ def _preprocess(products):
             attrs['comm'] = info['group']
         G.add_node(idx, **attrs)
 
-    # 3. Add edges between numeric IDs
     asin_to_id = {asin: idx for idx, asin in zip(node_ids, asins)}
     for asin, info in valid.items():
         u = asin_to_id[asin]
@@ -73,7 +65,6 @@ def _preprocess(products):
                 v = asin_to_id[nbr]
                 G.add_edge(u, v)
 
-    # 4. Build the sparse category matrix
     categories = [valid[asin].get('categories', []) for asin in asins]
     mlb = MultiLabelBinarizer(sparse_output=True)
     X = mlb.fit_transform(categories)  # CSR matrix: n_nodes × n_categories
