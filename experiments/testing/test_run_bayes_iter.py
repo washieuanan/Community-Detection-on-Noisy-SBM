@@ -49,6 +49,9 @@ def create_observed_subgraph(num_coords: int, observations: list[tuple[int, int]
     subG.add_nodes_from(range(num_coords))
     # Add observed edges
     subG.add_edges_from(observations)
+
+    nx.set_node_attributes(subG, None, 'coords')
+   
     return subG
 
 
@@ -147,18 +150,24 @@ def process_file(input_path: str, output_dir: str) -> None:
 
             print(" used here:")
             for n in subG.nodes(): 
-                subG.nodes[n]['coord'] = predicted_graph.nodes[n]['coord']
+                subG.nodes[n]['coords'] = predicted_graph.nodes[n]['coords']
 
             gamma = 1.0 
-            
-            for G_current in (predicted_graph, subG): 
-                for u, v in G_current.edges(): 
-                    d = np.linalg.norm(predicted_graph.nodes[u]['coord'] - predicted_graph.nodes[v]['coord'])
-                    psi = np.ones((k,k))
-                    np.fill_diagonal(psi, np.exp(-gamma *d)) 
-                    G_current[u][v]['psi'] = psi 
+            print("used here 2")
+            # for G_current in (predicted_graph, subG): 
+            #     for u, v in G_current.edges(): 
+            #         d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
+            #         psi = np.ones((k,k))
+            #         np.fill_diagonal(psi, np.exp(-gamma *d)) 
+            #         G_current[u][v]['psi'] = psi 
+            assert len(predicted_graph.nodes()) == len(G.nodes()), "Predicted graph and original graph have different number of nodes"
+            assert all(['coords' in predicted_graph.nodes[n] for n in range(len(G.nodes()))]), "Predicted graph has None coordinates"
+            for u, v in subG.edges():
+                d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
+                psi = np.ones((k,k))
+                np.fill_diagonal(psi, np.exp(-gamma *d)) 
+                subG[u][v]['psi'] = psi
 
-        
             print("  Running belief propagation...")
             
             _, preds, node2idx, idx2node = belief_propagation(
