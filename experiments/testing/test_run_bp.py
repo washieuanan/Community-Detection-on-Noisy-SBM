@@ -63,8 +63,8 @@ def process_file(input_path: str, output_dir: str) -> None:
     results: dict[str, dict] = {}
     for obs_name, obs_data in obs_dict.items():
         # Skip SingleSensorObservation
-        if obs_name == "SingleSensorObservation":
-            continue
+        if obs_name != "PairSamplingObservation":
+                continue
 
         k = parameters.get('K', 2)
         min_sep_map = {2: 0.3, 3: 0.2, 4: 0.15}
@@ -149,8 +149,8 @@ def process_file(input_path: str, output_dir: str) -> None:
 
 
 if __name__ == '__main__':
-    input_dir = 'observations_generation/gbm_observation_01'
-    output_dir = 'bp_04_30_results/01'
+    input_dir = 'datasets/observations_generation/gbm_observation_005'
+    output_dir = 'results/bp_05_05_results_non_vectorized/005'
     # Use sorted os.listdir and filter for graph_*.json
     files = sorted(
         f for f in os.listdir(input_dir)
