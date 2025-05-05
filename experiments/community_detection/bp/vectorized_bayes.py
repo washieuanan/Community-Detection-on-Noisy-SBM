@@ -162,7 +162,7 @@ class BayesianGraphInference:
         return dict(zip(open_grids, choices))
 
     def _pseudo_gbm_gen(self, G: nx.Graph) -> nx.Graph:
-        coords = np.vstack([G.nodes[n]["coord"] for n in G.nodes()])
+        coords = np.vstack([G.nodes[n]["coords"] for n in G.nodes()])
         D = distance.squareform(distance.pdist(coords, metric="euclidean"))
         P = 0.1 * np.exp(-1.0 * (5 * D) ** 2)
         tri_mask = np.triu(np.ones_like(P, dtype=bool), k=1)
@@ -178,16 +178,16 @@ class BayesianGraphInference:
         # Build graph with coords
         G = nx.Graph()
         for node, centre_idx in self.preds.items():
-            G.add_node(node, coord=self.centers[centre_idx])
+            G.add_node(node, coords=self.centers[centre_idx])
 
         unseen_map = self._assign_unseen_nodes()
         for node, centre_idx in unseen_map.items():
-            G.add_node(node, coord=self.centers[centre_idx])
+            G.add_node(node, coords=self.centers[centre_idx])
 
         # Ensure coordinates present for all nodes
         for node in range(self.n):
             if node not in G.nodes():
-                G.add_node(node, coord=self.centers[self.rng.integers(self.num_grids)])
+                G.add_node(node, coords=self.centers[self.rng.integers(self.num_grids)])
 
         # Add observed edges first (guaranteed)
         G.add_edges_from(self.obs)
@@ -239,14 +239,14 @@ if __name__ == "__main__":
 
     subG = create_observed_subgraph(G_true.number_of_nodes(), observations)
     for n in subG.nodes():
-        subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
+        subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
 
     # Attach edge potentials & run BP (unchanged vs. original)
     gamma = 1.0
     K = 3
     for G in (G_pred, subG):
         for u, v in G.edges():
-            d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
+            d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
             psi = np.ones((K, K))
             np.fill_diagonal(psi, np.exp(-gamma * d))
             G[u][v]["psi"] = psi
