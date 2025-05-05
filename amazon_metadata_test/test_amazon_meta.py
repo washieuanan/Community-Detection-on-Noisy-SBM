@@ -23,19 +23,33 @@ def coords_str2arr(G: nx.Graph, dim = 16):
         G.nodes[n]["coords"] = coord_arr
     return G
 if __name__ == "__main__":
+    import json
     G = nx.read_gml("amazon_metadata_test/amazon_graph.gml")
     G = coords_str2arr(G)
-    num_pairs = calc_num_pairs(G, scale_factor=0.25)
+    all_nodes_ok = True
+    for n in G.nodes():
+        if "comm" not in G.nodes[n]:
+            print(f"Node {n} is missing the 'comm' attribute.")
+            all_nodes_ok = False
+        if "coords" not in G.nodes[n]:
+            print(f"Node {n} is missing the 'coord' attribute.")
+            all_nodes_ok = False
+    if all_nodes_ok:
+        print("All nodes have both 'comm' and 'coord' attributes.")
+    print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
+    num_pairs = calc_num_pairs(G, scale_factor=0.1)
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
 
     sampler = PairSamplingObservation(G, num_samples=num_pairs, weight_func=weight_func, seed=42)
     observations = sampler.observe()
+    json.dump(observations, open("amazon_metadata_test/observations_01.json", "w"))
+    print(f"Created {len(observations)} observations")
     obs_nodes: set[int] = set()
     for u, v in observations:
             obs_nodes.add(u)
             obs_nodes.add(v)
-            
+    print("Beginning Bayesian Inference")
     bayes = BayesianGraphInference(
         observations=observations,
         observed_nodes=obs_nodes,
@@ -45,13 +59,13 @@ if __name__ == "__main__":
         seed=42,
     )
     G_pred = bayes.infer()
-    
+    print("Finished Bayesian Inference")
     subG = create_observed_subgraph(G.number_of_nodes(), observations)
     for n in subG.nodes():
         subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
 
     gamma = 1.0
-    K = 7
+    K = 4
     for g in (G_pred, subG):
         for u, v in g.edges():
             d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
@@ -59,7 +73,7 @@ if __name__ == "__main__":
             np.fill_diagonal(psi, np.exp(-gamma * d))
             g[u][v]["psi"] = psi
     print(G.nodes[0]['comm'])
-
+    print("Running Loopy BP …")
     _, preds, node2idx, idx2node = belief_propagation(
         subG,
         q=K,
@@ -70,7 +84,7 @@ if __name__ == "__main__":
         damping=0.10,
         balance_regularization=0.01,
     )
-
+    print("Finished Loopy BP")
     true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
     stats = detection_stats(preds, true_labels)
     print("\n=== Community‑detection accuracy ===")
