@@ -153,13 +153,13 @@ class BayesianGraphInference:
         open_mask = np.ones(self.num_grids, dtype=bool)
         open_mask[seen_centres] = False
         open_grids = np.where(open_mask)[0]
-        if open_grids.size == 0:
-            return {}
-        # distance from each open centre to set of assigned centres
-        dist = distance.cdist(self.centers[open_grids], self.centers[seen_centres], "euclidean").sum(axis=1)
+        # if open_grids.size == 0:
+        #     return {}
+        # # distance from each open centre to set of assigned centres
+        dist = distance.cdist(self.centers, self.centers[seen_centres], "euclidean").sum(axis=1)
         probs = dist / dist.sum()
-        choices = self.rng.choice(open_grids, size=open_grids.size, replace=False, p=probs)
-        return dict(zip(open_grids, choices))
+        choices = self.rng.choice(self.centers, size=self.n - len(self.preds), replace=False, p=probs)
+        return choices
 
     def _pseudo_gbm_gen(self, G: nx.Graph) -> nx.Graph:
         coords = np.vstack([G.nodes[n]["coords"] for n in G.nodes()])
@@ -180,14 +180,18 @@ class BayesianGraphInference:
         for node, centre_idx in self.preds.items():
             G.add_node(node, coords=self.centers[centre_idx])
 
-        unseen_map = self._assign_unseen_nodes()
-        for node, centre_idx in unseen_map.items():
-            G.add_node(node, coords=self.centers[centre_idx])
+        # unseen_map = self._assign_unseen_nodes()
+        # for node, centre_idx in unseen_map.items():
+        #     G.add_node(node, coords=self.centers[centre_idx])
+        unseen_assignments = self._assign_unseen_nodes()
+        unseen_nodes = set(range(self.n)) - set(self.preds.keys())
+        for ix, node in enumerate(unseen_nodes):
+            G.add_node(node, coords=unseen_assignments[ix])
 
-        # Ensure coordinates present for all nodes
-        for node in range(self.n):
-            if node not in G.nodes():
-                G.add_node(node, coords=self.centers[self.rng.integers(self.num_grids)])
+        # # Ensure coordinates present for all nodes
+        # for node in range(self.n):
+        #     if node not in G.nodes():
+        #         G.add_node(node, coords=self.centers[self.rng.integers(self.num_grids)])
 
         # Add observed edges first (guaranteed)
         G.add_edges_from(self.obs)
