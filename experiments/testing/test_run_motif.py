@@ -128,7 +128,6 @@ def process_file(input_path: str, output_dir: str) -> None:
             print(f"  Starting Bayesian inference with {len(observations)} observations and {len(observed_nodes)} observed nodes...")
             
             
-
             # Build observed subgraph and initialize beliefs
             subG = create_observed_subgraph(len(G.nodes()), observations)
 
