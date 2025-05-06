@@ -47,7 +47,7 @@ def spectral_clustering(
         G: nx.Graph,
         q: int, 
         seed: int = 0) -> Dict[int, int]: 
-    A = nx.adjacency_matrix(G) 
+    A = nx.adjacency_matrix(G).astype(np.float64) 
     _, vecs = sla.eigs(A, k=q, which='LM', tol=1e-2) 
 
     coords = np.real(vecs) 
@@ -217,7 +217,7 @@ def belief_propagation(
     n, m = len(node2idx), src.size // 2
     deg  = np.fromiter((G.degree[u] for u in G), dtype=np.int32)
 
-    coords = np.vstack([G.nodes[u]["coord"] for u in G])
+    coords = np.vstack([G.nodes[u]["coords"] for u in G])
     geo_w  = np.exp(-gamma * np.linalg.norm(coords[src] - coords[dst], axis=1))
 
     if beta is None:
