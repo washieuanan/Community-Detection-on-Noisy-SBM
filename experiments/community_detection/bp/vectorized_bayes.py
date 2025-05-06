@@ -35,6 +35,7 @@ class BayesianGraphInference:
         self.obs_nodes = list(observed_nodes)
         self.num_obs = len(self.obs_nodes)
         self.n = total_nodes
+        self.num_grids = 2*self.n
 
         self.centers, self.radius = self._split_sphere(n_candidates)
 
@@ -58,16 +59,16 @@ class BayesianGraphInference:
         X = sobol.random(n_candidates) * 2.0 - 1.0  # map to [-1,1]^d
         inside = np.linalg.norm(X, axis=1) <= 1.0
         X = X[inside]
-        if X.shape[0] < self.n:
+        if X.shape[0] < self.num_grids:
             raise ValueError(
-                f"Need at least {self.n} candidate points inside unit ball; got {X.shape[0]}."
+                f"Need at least {self.num_grids} candidate points inside unit ball; got {X.shape[0]}."
             )
 
-        centres = np.empty((self.n, self.d), dtype=np.float64)
+        centres = np.empty((self.num_grids, self.d), dtype=np.float64)
         centres[0] = X[0]
         closest2 = row_norms(X - centres[0], squared=True)
 
-        for k in range(1, self.n):
+        for k in range(1, self.num_grids):
             probs = closest2 / closest2.sum()
             idx = self.rng.choice(X.shape[0], p=probs)
             centres[k] = X[idx]
@@ -105,7 +106,7 @@ class BayesianGraphInference:
     def _build_pair_likelihood_matrix(self) -> None:
         """Populate self.Lmat[cu, cv] = P(edge observed | cu, cv)."""
         exp_edges = (3.0 / 8.0) * self.n * np.log(self.n)
-        W = exp_edges * np.exp(-0.5 * 4.0 / 3.0)  # constant part
+        W = exp_edges * np.exp(-0.5 * 0.25)  # constant part
 
         D = distance.cdist(self.centers, self.centers, metric="euclidean")
         W_p = np.exp(-0.5 * D)
@@ -113,7 +114,7 @@ class BayesianGraphInference:
 
    
     def _initialize_priors(self) -> None:
-        self.priors = self.rng.normal(loc=1.0, scale=0.1, size=(self.n, self.n))
+        self.priors = self.rng.normal(loc=1.0, scale=0.1, size=(self.n, self.num_grids))
         self.priors /= self.priors.sum(axis=1, keepdims=True)
 
     def _update_posteriors(self, u: int, v: int) -> None:
@@ -149,19 +150,19 @@ class BayesianGraphInference:
 
     def _assign_unseen_nodes(self) -> Dict[int, int]:
         seen_centres = np.array(list(self.preds.values()), dtype=int)
-        open_mask = np.ones(self.n, dtype=bool)
+        open_mask = np.ones(self.num_grids, dtype=bool)
         open_mask[seen_centres] = False
-        open_nodes = np.where(open_mask)[0]
-        if open_nodes.size == 0:
-            return {}
-        # distance from each open centre to set of assigned centres
-        dist = distance.cdist(self.centers[open_nodes], self.centers[seen_centres], "euclidean").sum(axis=1)
+        open_grids = np.where(open_mask)[0]
+        # if open_grids.size == 0:
+        #     return {}
+        # # distance from each open centre to set of assigned centres
+        dist = distance.cdist(self.centers, self.centers[seen_centres], "euclidean").sum(axis=1)
         probs = dist / dist.sum()
-        choices = self.rng.choice(open_nodes, size=open_nodes.size, replace=False, p=probs)
-        return dict(zip(open_nodes, choices))
+        choices = self.rng.choice(self.centers, size=self.n - len(self.preds), replace=False, p=probs)
+        return choices
 
     def _pseudo_gbm_gen(self, G: nx.Graph) -> nx.Graph:
-        coords = np.vstack([G.nodes[n]["coord"] for n in G.nodes()])
+        coords = np.vstack([G.nodes[n]["coords"] for n in G.nodes()])
         D = distance.squareform(distance.pdist(coords, metric="euclidean"))
         P = 0.1 * np.exp(-1.0 * (5 * D) ** 2)
         tri_mask = np.triu(np.ones_like(P, dtype=bool), k=1)
@@ -177,16 +178,20 @@ class BayesianGraphInference:
         # Build graph with coords
         G = nx.Graph()
         for node, centre_idx in self.preds.items():
-            G.add_node(node, coord=self.centers[centre_idx])
+            G.add_node(node, coords=self.centers[centre_idx])
 
-        unseen_map = self._assign_unseen_nodes()
-        for node, centre_idx in unseen_map.items():
-            G.add_node(node, coord=self.centers[centre_idx])
+        # unseen_map = self._assign_unseen_nodes()
+        # for node, centre_idx in unseen_map.items():
+        #     G.add_node(node, coords=self.centers[centre_idx])
+        unseen_assignments = self._assign_unseen_nodes()
+        unseen_nodes = set(range(self.n)) - set(self.preds.keys())
+        for ix, node in enumerate(unseen_nodes):
+            G.add_node(node, coords=unseen_assignments[ix])
 
-        # Ensure coordinates present for all nodes
-        for node in range(self.n):
-            if node not in G.nodes():
-                G.add_node(node, coord=self.centers[self.rng.integers(self.n)])
+        # # Ensure coordinates present for all nodes
+        # for node in range(self.n):
+        #     if node not in G.nodes():
+        #         G.add_node(node, coords=self.centers[self.rng.integers(self.num_grids)])
 
         # Add observed edges first (guaranteed)
         G.add_edges_from(self.obs)
@@ -238,14 +243,14 @@ if __name__ == "__main__":
 
     subG = create_observed_subgraph(G_true.number_of_nodes(), observations)
     for n in subG.nodes():
-        subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
+        subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
 
     # Attach edge potentials & run BP (unchanged vs. original)
     gamma = 1.0
     K = 3
     for G in (G_pred, subG):
         for u, v in G.edges():
-            d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
+            d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
             psi = np.ones((K, K))
             np.fill_diagonal(psi, np.exp(-gamma * d))
             G[u][v]["psi"] = psi
