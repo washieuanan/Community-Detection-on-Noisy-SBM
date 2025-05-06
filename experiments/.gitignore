@@ -83,3 +83,5 @@ data/
 *.swp
 *.swo
 
+# Graph files
+*.gml
