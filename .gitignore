@@ -1,3 +1,8 @@
 stochastic/
 
 *.json
+
+amazon_metadata_test/amazon-meta.txt
+amazon_metadata_test/amazon_graph.gml
+amazon_metadata_test/parsed_amazon_meta.json
+polblogs*
