@@ -32,21 +32,25 @@ except ImportError:
     _HAS_MINHASH = False
 
 
-def _preprocess(products):
+def _preprocess(products, subsampled_classes):
     """
     Build graph G, list of node IDs (0..n-1), and sparse category matrix X,
     skipping any product marked as discontinued. Each node is named by its
     numeric ID and has 'asin' and optionally 'comm' attributes.
+    
+    All classes that can be included in subsampled_classes:
+    * Book, DVD, Music, Video
     """
     G = nx.Graph()
 
     valid = {
         asin: info
         for asin, info in products.items()
-        if not (
-            info.get('group', None) is None
-        )
+        if (not info.get('group', None) is None)
+        and (info.get('group', None) in subsampled_classes)
     }
+    
+    comm_mapping = {sc: i for i, sc in enumerate(subsampled_classes)}
 
     asins = list(valid.keys())
     node_ids = list(range(len(asins)))
@@ -54,7 +58,7 @@ def _preprocess(products):
         info = valid[asin]
         attrs = {'asin': asin}
         if info.get('group') is not None:
-            attrs['comm'] = info['group']
+            attrs['comm'] = comm_mapping[info['group']]
         G.add_node(idx, **attrs)
 
     asin_to_id = {asin: idx for idx, asin in zip(node_ids, asins)}
@@ -68,7 +72,7 @@ def _preprocess(products):
     categories = [valid[asin].get('categories', []) for asin in asins]
     mlb = MultiLabelBinarizer(sparse_output=True)
     X = mlb.fit_transform(categories)  # CSR matrix: n_nodes × n_categories
-
+    G.graph['subclasses'] = ','.join(subsampled_classes)
     return G, node_ids, X
 
 
@@ -127,6 +131,7 @@ def _build_lsh(categories, num_perm=128, threshold=0.5):
 
 def embed_products(products,
                    method='svd',
+                   subsampled_classes=['Book', 'DVD', 'Music', 'Video'],
                    embedding_dim=2,
                    random_state=None,
                    use_dask=False,
@@ -143,7 +148,7 @@ def embed_products(products,
       - G with node attribute 'coords' (and 'asin', 'comm') set to the embedding
       - lsh index if method == 'minhash_lsh'
     """
-    G, node_ids, X = _preprocess(products)
+    G, node_ids, X = _preprocess(products, subsampled_classes)
 
     if method == 'svd':
         Y = _embed_svd(X, embedding_dim, random_state, use_dask)
@@ -180,6 +185,7 @@ products = json.load(open('amazon_metadata_test/parsed_amazon_meta.json'))
 G_embedded = embed_products(
     products,
     method='svd',              # or 'umap', 'landmark_mds', 'node2vec', 'minhash_lsh'
+    subsampled_classes=['DVD', 'Video'],
     embedding_dim=16,
     random_state=42,
     use_dask=True,             # only if Dask-ML is installed and you want parallel SVD
@@ -195,5 +201,5 @@ for node in G_embedded.nodes():
         coords = G_embedded.nodes[node]['coords']
         G_embedded.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_graph.gml')
+nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_graph_videoDVD.gml')
 # Now each node G_embedded.nodes[asin]['coords'] is a length-16 unit vector.
