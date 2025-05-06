@@ -23,7 +23,7 @@ os.environ['OMP_NUM_THREADS']      = str(n_cpus)
 
 warnings.filterwarnings("ignore", category=UserWarning, module='networkx')
 
-from community_detection.bp.vectorized_geometric_bp import (
+from community_detection.bp.vectorized_bp import (
     belief_propagation, 
     detection_stats, 
     get_true_communities
@@ -49,9 +49,6 @@ def create_observed_subgraph(num_coords: int, observations: list[tuple[int, int]
     subG.add_nodes_from(range(num_coords))
     # Add observed edges
     subG.add_edges_from(observations)
-
-    nx.set_node_attributes(subG, None, 'coords')
-   
     return subG
 
 
@@ -70,7 +67,7 @@ def process_file(input_path: str, output_dir: str) -> None:
         graph_data = data.get('graph', {})
 
         # Convert JSON graph to NetworkX graph
-        G = json_graph.node_link_graph(graph_data)
+        G = json_graph.node_link_graph(graph_data, edges="links")
 
         # Observations key contains all methods
         obs_dict = data.get('observations', {})
@@ -130,44 +127,12 @@ def process_file(input_path: str, output_dir: str) -> None:
 
             print(f"  Starting Bayesian inference with {len(observations)} observations and {len(observed_nodes)} observed nodes...")
             
-            try:
-                bayes = BayesianGraphInference(
-                    observations=observations,
-                    observed_nodes=observed_nodes, 
-                    total_nodes=len(G.nodes()),
-                    obs_format='base', 
-                    n_candidates=2**20
-                )
-
-                predicted_graph = bayes.infer()
-                print("  Bayesian inference completed successfully")
-            except Exception as e:
-                print(f"  ❌ Error in Bayesian inference: {str(e)}")
-                continue
+            
 
             # Build observed subgraph and initialize beliefs
             subG = create_observed_subgraph(len(G.nodes()), observations)
 
-            print(" used here:")
-            for n in subG.nodes(): 
-                subG.nodes[n]['coords'] = predicted_graph.nodes[n]['coords']
-
-            gamma = 1.0 
-            print("used here 2")
-            # for G_current in (predicted_graph, subG): 
-            #     for u, v in G_current.edges(): 
-            #         d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
-            #         psi = np.ones((k,k))
-            #         np.fill_diagonal(psi, np.exp(-gamma *d)) 
-            #         G_current[u][v]['psi'] = psi 
-            assert len(predicted_graph.nodes()) == len(G.nodes()), "Predicted graph and original graph have different number of nodes"
-            assert all(['coords' in predicted_graph.nodes[n] for n in range(len(G.nodes()))]), "Predicted graph has None coordinates"
-            for u, v in subG.edges():
-                d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
-                psi = np.ones((k,k))
-                np.fill_diagonal(psi, np.exp(-gamma *d)) 
-                subG[u][v]['psi'] = psi
-
+            
             print("  Running belief propagation...")
             
             _, preds, node2idx, idx2node = belief_propagation(
@@ -176,20 +141,13 @@ def process_file(input_path: str, output_dir: str) -> None:
                 seed=parameters.get('seed'),
                 balance_regularization=0.05, 
                 damping=0.15,
-                message_init=msg_init,
+                msg_init=msg_init,
                 group_obs=group_obs,
                 max_iter=5000,
                 min_sep=min_sep
             )
 
-            # Retrieve predictions
-            # print("  Getting predictions...")
-            # marginals, preds = get_marginals_and_preds(subG)
-
-            # # True community labels from original graph
-            # true = nx.get_node_attributes(G, 'comm')
-            # true = np.array(list(true.values()))
-
+           
             true = get_true_communities(G, node2idx=node2idx, attr='comm')
         
 
@@ -228,8 +186,8 @@ def process_file(input_path: str, output_dir: str) -> None:
 
 
 def main():
-    input_dir  = 'datasets/observations_generation/gbm_observation_005'
-    output_dir = 'results/bayes_bp_05_05_results/005'
+    input_dir  = 'datasets/observations_generation/gbm_observation_01'
+    output_dir = 'results/bp_05_05_results/010'
 
     os.makedirs(output_dir, exist_ok=True)
     print(f"✅ Output directory created/verified: {output_dir}")
@@ -253,52 +211,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-# def main():
-#     # Paths
-#     bp_results_dir = 'results/bp_05_01_results/01'
-#     input_dir = 'datasets/observations_generation/gbm_observation_01'
-#     output_dir = 'results/bayes_bp_05_02_results/01'
-    
-#     # Creates output directory if it doesn't exist
-#     os.makedirs(output_dir, exist_ok=True)
-#     print(f"✅ Output directory created/verified: {output_dir}")
-    
-#     # Get list of files that already have results in bp_results_dir
-#     result_files = glob.glob(os.path.join(bp_results_dir, 'graph_*_results.json'))
-    
-#     # Extract the graph numbers
-#     graph_numbers = []
-#     for result_file in result_files:
-#         base_name = os.path.basename(result_file)
-#         # Extract number from graph_XXX_results.json
-#         if base_name.startswith('graph_') and base_name.endswith('_results.json'):
-#             try:
-#                 num_str = base_name.replace('graph_', '').replace('_results.json', '')
-#                 graph_numbers.append(int(num_str))
-#             except ValueError:
-#                 print(f"Warning: Could not parse graph number from {base_name}")
-    
-#     # Sort graph numbers
-#     graph_numbers.sort()
-#     print(f"Found {len(graph_numbers)} graph results in {bp_results_dir}")
-    
-#     # Process each file sequentially
-#     for graph_num in graph_numbers:
-#         input_path = os.path.join(input_dir, f'graph_{graph_num:03d}.json')
-#         if os.path.exists(input_path):
-#             process_file(input_path, output_dir)
-#         else:
-#             print(f"❌ Input file not found: {input_path}")
-    
-#     print("✅ All processing completed!")
-
-
-# if __name__ == '__main__':
-#     main()
