@@ -24,7 +24,7 @@ def coords_str2arr(G: nx.Graph, dim = 16):
     return G
 if __name__ == "__main__":
     import json
-    G = nx.read_gml("amazon_metadata_test/amazon_graph.gml")
+    G = nx.read_gml("amazon_metadata_test/amazon_graph_videoDVD.gml")
     G = coords_str2arr(G)
     all_nodes_ok = True
     for n in G.nodes():
@@ -36,6 +36,7 @@ if __name__ == "__main__":
             all_nodes_ok = False
     if all_nodes_ok:
         print("All nodes have both 'comm' and 'coord' attributes.")
+    print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
     num_pairs = calc_num_pairs(G, scale_factor=0.1)
     def weight_func(c1, c2):
