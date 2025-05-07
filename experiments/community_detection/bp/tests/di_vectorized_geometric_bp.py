@@ -214,11 +214,30 @@ def belief_propagation(
 
 
     node2idx, idx2node, src, dst, rev = build_arrays(G)
+    
+
+
     n, m = len(node2idx), src.size // 2
     deg  = np.fromiter((G.degree[u] for u in G), dtype=np.int32)
 
-    coords = np.vstack([G.nodes[u]["coords"] for u in G])
-    geo_w  = np.exp(-gamma * np.linalg.norm(coords[src] - coords[dst], axis=1))
+
+
+    coords = np.vstack([G.nodes[u]["coords"] for u in G])      # (n, d)
+    
+    dist = np.empty(2 * m, dtype=np.float64)
+
+    for e in range(2 * m):
+        u_idx, v_idx = src[e], dst[e]
+        u, v = idx2node[u_idx], idx2node[v_idx]
+
+        d = G[u][v].get("obs_dist")          # try the observed distance first
+        if d is None:
+            d = np.linalg.norm(coords[u_idx] - coords[v_idx])
+        dist[e] = d
+
+    # geometric attenuation (γ is the free hyper‑parameter)
+    geo_w = np.exp(-gamma * dist)
+
 
     if beta is None:
         beta = calc_beta_param(G, q)

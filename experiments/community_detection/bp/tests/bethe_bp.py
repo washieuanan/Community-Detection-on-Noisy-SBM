@@ -3,6 +3,11 @@ from typing import Dict, List, Tuple, Literal
 import networkx as nx
 import numpy as np
 import scipy.sparse.linalg as sla
+
+import scipy.sparse as sp
+
+
+
 from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
@@ -33,11 +38,23 @@ def build_arrays(G: nx.Graph):
 #  Spectral initialisation helpers
 # -----------------------------------------------------------------------------
 
+# def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
+#     vals, vecs = sla.eigs(nx.adjacency_matrix(G), k=q, which="LM", tol=1e-2)
+#     km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
+#     return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
+
+def bethe_hessian_embedding(G: nx.Graph, q: int):
+    A = nx.to_scipy_sparse_array(G, dtype=float)
+    k = np.array([d for _, d in G.degree()], float)
+    r = np.sqrt(max(k.mean(), 1e-8))
+    I = sp.eye(A.shape[0], format="csr", dtype=float)   
+    H = (r ** 2 - 1) * I - r * A + sp.diags(k, format="csr")
+    vals, vecs = sla.eigsh(H, k=q, which="SM", tol=1e-2)
+    return np.real(vecs)
+
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
-    # Make sure the adjacency matrix uses a valid dtype for eigs
-    adj_mat = nx.adjacency_matrix(G).astype(np.float64)
-    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-2)
-    km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
+    emb = bethe_hessian_embedding(G, q)
+    km = KMeans(n_clusters=q, random_state=seed).fit(emb)
     return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
 
 
@@ -151,25 +168,16 @@ def belief_propagation(
     balance_regularization: float = 0.10,
     seed: int = 0,
     min_steps: int = 0,
-    init: Literal["random", "spectral"] = "random",
+    init: Literal["random", "spectral"] = "spectral",
     msg_init: Literal["random", "copy", "pre-group"] = "random",
     group_obs: List | None = None,
     min_sep: float | None = None,
     eps: float = 0.1,
+    mode: Literal["sbm", "dc"] = "dc",
 ):
     """Vectorised BP that reproduces the exact math/logic of the reference loop."""
 
     rng = np.random.default_rng(seed)
-    
-    # Check if the graph has enough edges to run BP
-    if G.number_of_edges() < 1:
-        print("[BP] Warning: Graph has no edges, returning random beliefs")
-        node2idx = {u: i for i, u in enumerate(G)}
-        idx2node = {i: u for u, i in node2idx.items()}
-        n = len(node2idx)
-        beliefs = init_beliefs(n, q, rng)
-        preds = beliefs.argmax(1)
-        return beliefs, preds, node2idx, idx2node
 
     # ---------------------------------------------------------------------
     #  Pre‑compute arrays & constants
@@ -181,6 +189,8 @@ def belief_propagation(
     if beta is None:
         beta = beta_param(G, q) * 1.1  # match reference scaling
     exp_beta = np.exp(beta)
+
+    adapt_every = 10
 
     # ---------------------------------------------------------------------
     #  Initial beliefs & messages
@@ -217,26 +227,39 @@ def belief_propagation(
         beliefs[:] = np.exp(S - S.max(1)[:, None])
         beliefs /= beliefs.sum(1)[:, None]
 
+        if it < 100:                              # only during the first few rounds
+            iso_mask = deg == 0                  # vertices with *observed* degree 0
+            if iso_mask.any():
+                # mix 1 % of the uniform distribution into their current belief
+                beliefs[iso_mask] = (
+                    0.99 * beliefs[iso_mask] + 0.02 / q
+                )   # theta
         # --------------------------------------------------------------
         #  Community sizes & theta (same formulas)
         # --------------------------------------------------------------
         comm_sz = beliefs.mean(0)                          # community_sizes
-        theta = (deg[:, None] * beliefs).sum(0)            # theta
+        theta = (deg[:, None] * beliefs).sum(0)         
+        
+        
 
         # --------------------------------------------------------------
         #  Message update  (vectorised reference equation)
         # --------------------------------------------------------------
-        # Safe handling of zero edge case
-        if m > 0:
-            messages_new = np.exp(
-                -beta * deg[src, None] * theta / (2.0 * m) +   # term1
-                S[src] -                                       # Σ over neighbours except dst
-                log_fac[rev] -                                 # subtract k→i contribution
-                balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
-            )
-        else:
-            # If m=0, provide a fallback to prevent division by zero
-            messages_new = np.ones_like(messages_old)
+        # messages_new = np.exp(
+        #     -beta * deg[src, None] * theta / (2.0 * m) +   # term1
+        #     S[src] -                                       # Σ over neighbours except dst
+        #     log_fac[rev] -                                 # subtract k→i contribution
+        #     balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
+        # )
+
+        if mode == "dc": 
+            dc_fac =    1.0 / np.sqrt(deg[src, None] * deg[dst, None])
+        else: 
+            dc_fac = 1.0 
+
+        messages_new = np.exp(
+            -beta * deg[src, None] * theta / (2.0 * m) + S[src] - log_fac[rev] - balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
+        ) * dc_fac
         messages_new /= messages_new.sum(1)[:, None]
 
         # Damp
@@ -245,22 +268,11 @@ def belief_propagation(
         # --------------------------------------------------------------
         #  Convergence check & optional entropy‑based noise reinjection
         # --------------------------------------------------------------
-        if messages.size == 0:  # Safeguard against empty message arrays
-            print("[BP] Warning: Empty message arrays detected, aborting loop")
-            delta = 0.0
-            break
-        
-        # Protected maximum calculation
-        try:
-            delta = np.max(np.abs(messages - messages_old))
-        except ValueError as e:
-            if "zero-size array" in str(e):
-                print("[BP] Warning: Zero-size array in delta calculation, aborting loop")
-                delta = 0.0
-                break
-            else:
-                raise
-                
+        delta = np.max(np.abs(messages - messages_old))
+        if it < 20: 
+            cur_damp = damping
+        else:
+            cur_damp = min(0.05 + 0.95 * (delta / 0.5), damping)
         convergence_history.append(float(delta))
 
         if delta < tol and it >= min_steps:
@@ -272,10 +284,19 @@ def belief_propagation(
                 break
             # Otherwise inject noise as in reference
             noise = rng.random(messages.shape) * 0.15 / (comm_sz + 1e-10)
-            messages[:] = messages * 0.85 + noise
+            messages[:] = (1.0 - damping) * messages_new + damping * messages_old
+
             messages /= messages.sum(1)[:, None]
 
+        preds = beliefs.argmax(1)
         messages_old, messages = messages, messages_old  # swap buffers
+        if (it + 1) % adapt_every == 0:
+            same = (preds[src] == preds[dst]).mean() 
+            uniform = 1 / q 
+            rho = max(same - uniform, 1e-3) 
+            beta = np.log((1 + (q-1) * rho) / (1 - rho))
+            exp_beta = np.exp(beta)
+                
     else:
         print(f"[BP] did not converge within {max_iter} iterations (Δ={delta:.2e})")
 
@@ -321,3 +342,57 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     for u,i in node2idx.items():
         arr[i] = G.nodes[u][attr]
     return arr
+
+if __name__ == "__main__": 
+    from graph_generation.gbm import generate_gbm
+    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from community_detection.bp.vectorized_geometric_bp import (
+        detection_stats,
+        get_true_communities,
+    )
+
+    # Generate latent GBM graph
+    G_true = generate_gbm(n=700, K=3, a=75, b=20, seed=42)
+    avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
+    original_density = avg_deg / len(G_true.nodes)
+    C = 0.025 * original_density
+
+    def weight_func(c1, c2):
+        return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+
+    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    observations = sampler.observe()
+
+
+    observations_ = [(u, v, d_uv) for (u, v), d_uv in observations]
+
+   
+    obs_nodes: set[int] = set()
+    for u, v, _ in observations_:
+        obs_nodes.update((u, v))
+
+    # Build subgraph of observed nodes with inferred coords (for BP)
+    from community_detection.bp.gbm_bp import create_observed_subgraph
+
+    subG = create_observed_subgraph(G_true.number_of_nodes(), observations_)
+  
+
+    print("Running Loopy BP …")
+    _, preds, node2idx, idx2node = belief_propagation(
+        subG,
+        q=3,
+        seed=42,
+        init="spectral",
+        msg_init="random",
+        max_iter=5000,
+        damping=0.27,
+        balance_regularization=0.05,
+        mode="dc",
+    )
+
+    true_labels = get_true_communities(G_true, node2idx=node2idx, attr="comm")
+    stats = detection_stats(preds, true_labels)
+    print("\n=== Community‑detection accuracy ===")
+    for k, v in stats.items():
+        print(f"{k:>25s} : {v}")

@@ -84,4 +84,4 @@ data/
 *.swo
 
 # Graph files
-*.gml
+*.gml.DS_Store
