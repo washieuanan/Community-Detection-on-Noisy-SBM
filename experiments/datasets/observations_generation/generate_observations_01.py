@@ -1,62 +1,3 @@
-'''
-
-We have a directory called gbm_graphs_directory that holds "graphs_xxx.json" where xxx is 001-500. 
-Each JSON contains a Python dictionary with two keys, "params" and "graph". params has various parameters of the GBM 
-and "graph" is a JSON-version of a networkx graph. 
-
-Load the networkx graph and run the following functionalities: 
-
-We would like to run: 
-    - Observation
-    - GroupedMultiSensorObservation
-    - SingleSensorObservation
-    - RandomWalkObservation 
-    - GroupedRandomWalkObservation
-
-to be generated for each graph. The observations for each class can be found by class_instance.observe(). 
-
-SingleSensorObservation is initialized as follows: 
-    - SingleSensorObservation(G, seed=42, sensor=0, radii=np.linspace(0.1,1.0,10))
-    - take G from loading the graph, assume sensor = 0, and keep radii = np.linspace(0.1, 1.0, 10) 
-
-    MultiSensorObservation is initialized as follows: 
-        - MultiSensorObservation(G, seed=42, num_sensors=3, min_step = 0.15, mradii=np.linspace(0.1,1.0,10))
-            - take G from loading the graph, num_sensors = k, prob_fn will be specified, deduplicate_edges = True, 
-            seed is provided in the params part of the JSON
-            - For k=2, min_step = 0.3
-            - For k=3, min_step = 0.2
-            - For k=4, min_step = 0.15
-
-    - GroupMultiSensorObservation is initialized just as MultiSensorObservation 
-
-RandomWalkObservation is initialized as follows: 
-    - RandomWalkObservation(
-        graph=G,
-        seed=123,
-        num_walkers=10, # int(Unif(sqrt(n)/log n, sqrt(n)))
-        num_steps=5, # int(Unif(5, n/ num_walkers*log(n))) 
-        stopping_param=0.1, # CONSTANT 
-        leaky=0.1, # CONSTANT
-    )
-
-    - take G from loading the graph, seed from params, num_walkers = int(Unif(sqrt(n) / log n, sqrt(n)))
-    num_steps = int(Unif(5, n / num_walkers * log(n)))
-    stopping_param = 0.1 # Constant
-    leaky = 0.1 # Constant
-
-GroupRandomWalkObservation follows from the initialization of RandomWalkObservation 
-
-
-The way to run each one is to initialize the observation class and run .observe(). It will return the output of the observation. 
-
-In the dictionary store it as the name of the observation. Generate a JSON containing the original JSON info passed in + the observations.
-Save as JSON. 
-
-'''
-
-
-#!/usr/bin/env python3
-
 import os
 import json
 import math
@@ -86,7 +27,7 @@ def get_coordinate_distance(coord1: Tuple[float, float], coord2: Tuple[float, fl
 
 # Directories
 INPUT_DIR = 'datasets/gbm_graphs_data_w_threshold/'
-OUTPUT_DIR = 'observations_generation/gbm_observation_01/'
+OUTPUT_DIR = 'datasets/observations_w_distances/010'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Iterate over each JSON file
@@ -130,70 +71,70 @@ for filename in tqdm(sorted(os.listdir(INPUT_DIR)), desc="Processing graphs", un
     num_walkers = max(1,int((C * 0.1 * len(G.nodes)) / 2))
     num_sensors = max(1, int((C * len(G.nodes)) / ((0.25)**3 * avg_degree)))
     
-    multi = sensor_observe.MultiSensorObservation(
-        G,
-        seed=params.get('seed', 42),
-        num_sensors=num_sensors,
-        min_sep=min_sep,
-        radii=np.linspace(0.1, 1.0, 10),
-        deduplicate_edges=True,
-    )
+    # multi = sensor_observe.MultiSensorObservation(
+    #     G,
+    #     seed=params.get('seed', 42),
+    #     num_sensors=num_sensors,
+    #     min_sep=min_sep,
+    #     radii=np.linspace(0.1, 1.0, 10),
+    #     deduplicate_edges=True,
+    # )
     
-    multi_observe = multi.observe()
-    sparsity = multi.get_count() / (len(G.edges) * len(G.nodes))
+    # multi_observe = multi.observe()
+    # sparsity = multi.get_count() / (len(G.edges) * len(G.nodes))
     
     
-    observations[f'MultiSensorObservation_k{k}'] = {'observations':multi_observe, 'sparsity': sparsity}
+    # observations[f'MultiSensorObservation_k{k}'] = {'observations':multi_observe, 'sparsity': sparsity}
 
     
-    grouped = sensor_observe.GroupedMultiSensorObservation(
-        G,
-        seed=params.get('seed', 42),
-        num_sensors=num_sensors,
-        min_sep=min_sep,
-        radii=np.linspace(0.1, 1.0, 10),
-        deduplicate_edges=True,
-    )
+    # grouped = sensor_observe.GroupedMultiSensorObservation(
+    #     G,
+    #     seed=params.get('seed', 42),
+    #     num_sensors=num_sensors,
+    #     min_sep=min_sep,
+    #     radii=np.linspace(0.1, 1.0, 10),
+    #     deduplicate_edges=True,
+    # )
 
-    grouped_observe = grouped.observe()
-    sparsity = grouped.get_count() / (len(G.edges) * len(G.nodes))
-    observations[f'GroupedMultiSensorObservation_k{k}'] = {'observations': grouped_observe, 'sparsity': sparsity}
+    # grouped_observe = grouped.observe()
+    # sparsity = grouped.get_count() / (len(G.edges) * len(G.nodes))
+    # observations[f'GroupedMultiSensorObservation_k{k}'] = {'observations': grouped_observe, 'sparsity': sparsity}
 
-    # RandomWalkObservation and GroupedRandomWalkObservation
-    # rng = np.random.default_rng(params.get('seed', 123))
-    # low_rw = math.sqrt(n) / math.log(n)
-    # high_rw = math.sqrt(n)
-    # num_walkers = int(rng.uniform(low_rw, high_rw))
-    # num_steps = int(rng.uniform(5, (n / num_walkers) * math.log(n)))
-
-    
-    rw = random_walk_obs.RandomWalkObservation(
-        graph=G,
-        seed=params.get('seed', 123),
-        num_walkers=num_walkers,
-        num_steps=0,
-        stopping_param=0.1,
-        leaky=0.1,
-    )
-
-    rw_observe = rw.observe()
-    sparsity = rw.get_count() / (len(G.edges) * len(G.nodes))
-    observations['RandomWalkObservation'] = {'observations': rw_observe, 'sparsity': sparsity}
-    # observations['RandomWalkObservation'] = rw.observe()
+    # # RandomWalkObservation and GroupedRandomWalkObservation
+    # # rng = np.random.default_rng(params.get('seed', 123))
+    # # low_rw = math.sqrt(n) / math.log(n)
+    # # high_rw = math.sqrt(n)
+    # # num_walkers = int(rng.uniform(low_rw, high_rw))
+    # # num_steps = int(rng.uniform(5, (n / num_walkers) * math.log(n)))
 
     
-    grw = random_walk_obs.GroupedRandomWalkObservation(
-        graph=G,
-        seed=params.get('seed', 123),
-        num_walkers=num_walkers,
-        num_steps=0,
-        stopping_param=0.1,
-        leaky=0.1,
-    )
-    grw_observe = grw.observe()
-    sparsity = int(grw.count) / (len(G.edges) * len(G.nodes))
-    observations['GroupedRandomWalkObservation'] = {'observations': grw_observe, 'sparsity': sparsity}
-    # observations['GroupedRandomWalkObservation'] = grw.observe()
+    # rw = random_walk_obs.RandomWalkObservation(
+    #     graph=G,
+    #     seed=params.get('seed', 123),
+    #     num_walkers=num_walkers,
+    #     num_steps=0,
+    #     stopping_param=0.1,
+    #     leaky=0.1,
+    # )
+
+    # rw_observe = rw.observe()
+    # sparsity = rw.get_count() / (len(G.edges) * len(G.nodes))
+    # observations['RandomWalkObservation'] = {'observations': rw_observe, 'sparsity': sparsity}
+    # # observations['RandomWalkObservation'] = rw.observe()
+
+    
+    # grw = random_walk_obs.GroupedRandomWalkObservation(
+    #     graph=G,
+    #     seed=params.get('seed', 123),
+    #     num_walkers=num_walkers,
+    #     num_steps=0,
+    #     stopping_param=0.1,
+    #     leaky=0.1,
+    # )
+    # grw_observe = grw.observe()
+    # sparsity = int(grw.count) / (len(G.edges) * len(G.nodes))
+    # observations['GroupedRandomWalkObservation'] = {'observations': grw_observe, 'sparsity': sparsity}
+    # # observations['GroupedRandomWalkObservation'] = grw.observe()
 
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
@@ -211,16 +152,16 @@ for filename in tqdm(sorted(os.listdir(INPUT_DIR)), desc="Processing graphs", un
     observations['PairSamplingObservation'] = {'observations': pso_observe, 'sparsity': sparsity}
     # observations['PairSamplingObservation'] = pso.observe() 
     
-    vbs = standard_observe.VertexBasedSamplingObservation(
-        graph = G,
-        weight_func=weight_func,
-        seed = params.get('seed', 123)
-    )
+    # vbs = standard_observe.VertexBasedSamplingObservation(
+    #     graph = G,
+    #     weight_func=weight_func,
+    #     seed = params.get('seed', 123)
+    # )
 
-    vbs_observe = vbs.observe()
-    sparsity = vbs.get_count() / (len(G.edges) * len(G.nodes))
-    observations['VertexBasedSamplingObservation'] = {'observations': vbs_observe, 'sparsity': sparsity}
-    # observations['VertexBasedSamplingObservation'] = vbs.observe()
+    # vbs_observe = vbs.observe()
+    # sparsity = vbs.get_count() / (len(G.edges) * len(G.nodes))
+    # observations['VertexBasedSamplingObservation'] = {'observations': vbs_observe, 'sparsity': sparsity}
+    # # observations['VertexBasedSamplingObservation'] = vbs.observe()
 
 
     # Combine and save, matching input structure

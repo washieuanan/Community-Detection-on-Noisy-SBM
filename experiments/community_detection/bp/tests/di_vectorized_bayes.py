@@ -28,10 +28,10 @@ class BayesianGraphInference:
         dim: int = 3,
         n_candidates: int = 2 ** 20,
         seed: int | None = None,
-        num_categories: int = 10
     ) -> None:
         self.rng = np.random.default_rng(seed)
-        self.obs = observations
+        self.obs = self.obs = np.asarray(observations, dtype=float)
+
         self.d = dim
         self.obs_nodes = list(observed_nodes)
         self.num_obs = len(self.obs_nodes)
@@ -51,10 +51,10 @@ class BayesianGraphInference:
         self.obs_format = obs_format
 
         # Build likelihood matrix once
+        self.D = distance.cdist(self.centers, self.centers, metric="euclidean")
         self._build_pair_likelihood_matrix()
-        self.num_categories = num_categories
-        self.radii_splits = np.linspace(1/num_categories, 1.0, num_categories, endpoint=True)
 
+    
     def _split_sphere(self, n_candidates: int) -> Tuple[np.ndarray, float]:
         """Return (centers, radius) using k‑means++ seeding inside unit ball."""
         sobol = qmc.Sobol(self.d, scramble=False, seed=0)
@@ -80,43 +80,12 @@ class BayesianGraphInference:
         radius = float(np.sqrt(closest2.max()))
         return centres, radius
 
-    def _split_cluster_radii(self):
-        """Split the cluster centers into num_categories intervals."""
-        radii_assignments = np.zeros(self.num_grids, dtype=int)
-        for i in range(self.num_categories - 1):
-            in_category_radii = np.where((np.linalg.norm(self.centers, axis=1) < self.radii_splits[i+1])
-                                         & (np.linalg.norm(self.centers, axis=1) >= self.radii_splits[i]))
-            radii_assignments[in_category_radii] = i
-        return radii_assignments
    
-    def _split_nodes_by_degree(self):
-        """split nodes into num_categories intervals based on degree"""
-        degrees = np.array([len(self.obs_dict.get(node, [])) for node in range(self.n)])
-        sorted_idx = np.argsort(degrees)
-        category_volumes = np.zeros(self.num_categories)
-        for i in range(self.num_categories - 1):
-            vol = 4/3 * np.pi * self.radii_splits[i]**3
-            if i > 0:
-                vol -= category_volumes[i-1]
-            category_volumes[i] = vol
-        # Determine the number of nodes in each category based on volumes.
-        counts = (category_volumes * self.n).astype(int)
-        # Adjust counts so their sum equals self.n (due to rounding)
-        diff = self.n - counts.sum()
-        counts[-1] += diff
-        node_categories = np.empty(self.n, dtype=int)
-        start = 0
-        for cat in range(self.num_categories):
-            end = start + counts[cat]
-            node_categories[sorted_idx[start:end]] = cat
-            start = end
-        return node_categories
-        
     def _process_observations_base(self) -> Dict[int, Set[int]]:
         obs_dict = {o_n: set() for o_n in self.obs_nodes}
-        for u, v in self.obs:
-            obs_dict[u].add(v)
-            obs_dict[v].add(u)
+        for u, v, _ in self.obs:
+            obs_dict[int(u)].add(int(v))
+            obs_dict[int(v)].add(int(u))
         return obs_dict
 
     def _process_observations_GRW(self) -> Dict[int, Set[int]]:
@@ -141,47 +110,46 @@ class BayesianGraphInference:
         exp_edges = (3.0 / 8.0) * self.n * np.log(self.n)
         W = exp_edges * np.exp(-0.5 * 0.25)  # constant part
 
-        D = distance.cdist(self.centers, self.centers, metric="euclidean")
-        W_p = np.exp(-0.5 * D)
+        # D = distance.cdist(self.centers, self.centers, metric="euclidean")
+        W_p = np.exp(-0.5 * self.D)
         self.Lmat = 1.0 - np.power(1.0 - W_p / W, self.num_obs, dtype=np.float64)
+
+    def _dist_likelihood(self, d_obs: float) -> np.ndarray:
+    # vector of shape (G,)
+        self.sigma = 0.5 * self.radius
+        return np.exp(-0.5 * ((self.D[:, self._cv] - d_obs)/self.sigma)**2)
 
    
     def _initialize_priors(self) -> None:
-        radii_assignments = self._split_cluster_radii()
-        node_categories = self._split_nodes_by_degree()
         self.priors = self.rng.normal(loc=1.0, scale=0.1, size=(self.n, self.num_grids))
-        bias_value = 1.0  # Adjust the bias strength as needed
-        for i in range(self.n):
-            assigned_cat = node_categories[i]
-            self.priors[i, radii_assignments == assigned_cat] += bias_value
         self.priors /= self.priors.sum(axis=1, keepdims=True)
 
-    def _update_posteriors(self, u: int, v: int) -> None:
+    def _update_posteriors(self, u: int, v: int, d_obs: float) -> None:
         cu = int(self.priors[u].argmax())
         cv = int(self.priors[v].argmax())
 
         # Likelihood vectors (shape n,)
-        L_u = self.Lmat[:, cv]
-        L_v = self.Lmat[:, cu]
+        self._cv = cv 
+        L_u = self.Lmat[:, cv] * self._dist_likelihood(d_obs)
+        self._cv = cu
+        L_v = self.Lmat[:, cu] * self._dist_likelihood(d_obs)
 
         self.priors[u] *= L_u
         self.priors[v] *= L_v
         self.priors[[u, v]] /= self.priors[[u, v]].sum(axis=1, keepdims=True)
 
     
-    def _build_obs_sequence(self, epochs: int = 1000) -> np.ndarray:
-        all_pairs = np.array(
-            [(u, v) for u in self.obs_nodes for v in self.obs_dict[u]], dtype=int
-        )
-        obs_seq = np.repeat(all_pairs, epochs, axis=0)
+    def _build_obs_sequence(self, epochs: int = 20):
+    # (N × epochs, 3) float array
+        obs_seq = np.repeat(self.obs, epochs, axis=0)
         self.rng.shuffle(obs_seq)
         return obs_seq
 
     def _infer_center_assignments(self) -> Dict[int, int]:
         self._initialize_priors()
         obs_seq = self._build_obs_sequence()
-        for u, v in obs_seq:
-            self._update_posteriors(int(u), int(v))
+        for u, v, d_obs in obs_seq:
+            self._update_posteriors(int(u), int(v), d_obs)
         # MAP estimate for all nodes
         self.preds = {node: int(self.priors[node].argmax()) for node in self.obs_nodes}
         return self.preds
@@ -222,6 +190,11 @@ class BayesianGraphInference:
         # unseen_map = self._assign_unseen_nodes()
         # for node, centre_idx in unseen_map.items():
         #     G.add_node(node, coords=self.centers[centre_idx])
+
+        # assert all nodes have attribute "coords"
+        assert all(
+            "coords" in G.nodes[node] for node in G.nodes()
+        ), "Not all nodes have coordinates assigned."
         unseen_assignments = self._assign_unseen_nodes()
         unseen_nodes = set(range(self.n)) - set(self.preds.keys())
         for ix, node in enumerate(unseen_nodes):
@@ -233,7 +206,9 @@ class BayesianGraphInference:
         #         G.add_node(node, coords=self.centers[self.rng.integers(self.num_grids)])
 
         # Add observed edges first (guaranteed)
-        G.add_edges_from(self.obs)
+        for u, v, d_uv in self.obs:
+        # make sure (u, v) are already nodes with coords
+            G.add_edge(u, v, obs_dist=float(d_uv))
         # Stochastically add further edges
         return self._pseudo_gbm_gen(G)
 
@@ -241,7 +216,7 @@ class BayesianGraphInference:
 
 if __name__ == "__main__":
     from graph_generation.gbm import generate_gbm
-    from observations.standard_observe import OldPairSamplingObservation, get_coordinate_distance
+    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from community_detection.bp.vectorized_geometric_bp import (
         belief_propagation,
         detection_stats,
@@ -252,52 +227,58 @@ if __name__ == "__main__":
     G_true = generate_gbm(n=500, K=3, a=100, b=50, seed=123)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.01 * original_density
+    C = 0.025 * original_density
 
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
 
     num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    sampler = OldPairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
     observations = sampler.observe()
 
-    obs_nodes: Set[int] = set()
-    for u, v in observations:
-        obs_nodes.add(u)
-        obs_nodes.add(v)
+    # BEFORE:  observations = [((u, v), d_uv), …]
 
-    # Run Bayesian inference
-    bayes = BayesianGraphInference(
-        observations=observations,
-        observed_nodes=obs_nodes,
-        total_nodes=G_true.number_of_nodes(),
-        obs_format="base",
-        n_candidates=2 ** 20,
-        seed=42,
-    )
-    G_pred = bayes.infer()
+    observations_ = [(u, v, d_uv) for (u, v), d_uv in observations]
+
+   
+    obs_nodes: set[int] = set()
+    for u, v, _ in observations_:
+        obs_nodes.update((u, v))
+
+
+    # # Run Bayesian inference
+    # bayes = BayesianGraphInference(
+    #     observations=observations_,
+    #     observed_nodes=obs_nodes,
+    #     total_nodes=G_true.number_of_nodes(),
+    #     obs_format="base",
+    #     n_candidates=2 ** 20,
+    #     seed=42,
+    # )
+    # G_pred = bayes.infer()
 
     # Build subgraph of observed nodes with inferred coords (for BP)
-    from community_detection.bp.gbm_bp import old_create_observed_subgraph
+    from community_detection.bp.gbm_bp import create_observed_subgraph
 
-    subG = old_create_observed_subgraph(G_true.number_of_nodes(), observations)
-    for n in subG.nodes():
-        subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
+    subG = create_observed_subgraph(G_true.number_of_nodes(), observations_)
+    # for n in subG.nodes():
+    #     subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
 
-    # Attach edge potentials & run BP (unchanged vs. original)
-    gamma = 1.0
-    K = 3
-    for G in (G_pred, subG):
-        for u, v in G.edges():
-            d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
-            psi = np.ones((K, K))
-            np.fill_diagonal(psi, np.exp(-gamma * d))
-            G[u][v]["psi"] = psi
+    # # Attach edge potentials & run BP (unchanged vs. original)
+    # # change gamma to be 4 / avg deg
+    # gamma = 4 / avg_deg
+    # K = 3
+    # for G in (G_pred, subG):
+    #     for u, v in G.edges():
+    #         d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
+    #         psi = np.ones((K, K))
+    #         np.fill_diagonal(psi, np.exp(-gamma * d))
+    #         G[u][v]["psi"] = psi
 
     print("Running Loopy BP …")
     _, preds, node2idx, idx2node = belief_propagation(
         subG,
-        q=K,
+        q=3,
         seed=42,
         init_beliefs="spectral",
         message_init="random",
