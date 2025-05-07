@@ -38,56 +38,62 @@ if __name__ == "__main__":
         print("All nodes have both 'comm' and 'coord' attributes.")
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
-    num_pairs = calc_num_pairs(G, scale_factor=0.1)
-    def weight_func(c1, c2):
-        return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+    
+    def weight_func(c1, c2): 
+        return 1.0
+    
+    observations = {}
+    for sparsity in [0.01, 0.025, 0.05]: 
+        num_pairs = calc_num_pairs(G, scale_factor = sparsity)
+        sampler = PairSamplingObservation(G, num_samples = num_pairs, weight_func = weight_func, seed = 42) 
+        observations[str(sparsity)] = sampler.observe()
 
-    sampler = PairSamplingObservation(G, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    observations = sampler.observe()
-    json.dump(observations, open("amazon_metadata_test/observations_01.json", "w"))
+
+
+    json.dump(observations, open("amazon_metadata_test/observations_025_05_01.json", "w"))
     print(f"Created {len(observations)} observations")
-    obs_nodes: set[int] = set()
-    for u, v in observations:
-            obs_nodes.add(u)
-            obs_nodes.add(v)
-    print("Beginning Bayesian Inference")
-    bayes = BayesianGraphInference(
-        observations=observations,
-        observed_nodes=obs_nodes,
-        total_nodes=G.number_of_nodes(),
-        obs_format="base",
-        n_candidates=2 ** 20,
-        seed=42,
-    )
-    G_pred = bayes.infer()
-    print("Finished Bayesian Inference")
-    subG = create_observed_subgraph(G.number_of_nodes(), observations)
-    for n in subG.nodes():
-        subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
+    #obs_nodes: set[int] = set()
+    #for u, v in observations:
+     #       obs_nodes.add(u)
+      #      obs_nodes.add(v)
+   # print("Beginning Bayesian Inference")
+    #bayes = BayesianGraphInference(
+    #    observations=observations,
+     #   observed_nodes=obs_nodes,
+      #  total_nodes=G.number_of_nodes(),
+ #       #obs_format="base",
+ #       #n_candidates=2 ** 20,
+ #       #seed=42,
+ #   )
+ #   G_pr#ed = bayes.infer()
+ #   prin#t("Finished Bayesian Inference")
+ #   subG# = create_observed_subgraph(G.number_of_nodes(), observations)
+ #   for #n in subG.nodes():
+ #       #subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
 
-    gamma = 1.0
-    K = 4
-    for g in (G_pred, subG):
-        for u, v in g.edges():
-            d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
-            psi = np.ones((K, K))
-            np.fill_diagonal(psi, np.exp(-gamma * d))
-            g[u][v]["psi"] = psi
-    print(G.nodes[0]['comm'])
-    print("Running Loopy BP …")
-    _, preds, node2idx, idx2node = belief_propagation(
-        subG,
-        q=K,
-        seed=42,
-        init_beliefs="spectral",
-        message_init="random",
-        max_iter=5000,
-        damping=0.10,
-        balance_regularization=0.01,
-    )
-    print("Finished Loopy BP")
-    true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
-    stats = detection_stats(preds, true_labels)
-    print("\n=== Community‑detection accuracy ===")
-    for k, v in stats.items():
-        print(f"{k:>25s} : {v}")
+ #   gamm#a = 1.0
+ #   K = #4
+ #   for #g in (G_pred, subG):
+ #       #for u, v in g.edges():
+ #       #    d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
+ #       #    psi = np.ones((K, K))
+ #       #    np.fill_diagonal(psi, np.exp(-gamma * d))
+ #       #    #g[u][v]["psi"] = psi
+ #   prin#t(G.nodes[0]['comm'])
+ #   prin#t("Running Loopy BP …")
+ #   _, p#reds, node2idx, idx2node = belief_propagation(
+ #       #subG,
+ #       #q=K,
+ #       #seed=42,
+ #       #init_beliefs="spectral",
+ #       #message_init="random",
+ #       #max_iter=5000,
+ #       #damping=0.10,
+ #       #balance_regularization=0.01,
+ #   )
+ #   prin#t("Finished Loopy BP")
+ #   true#_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
+ #   stat#s = detection_stats(preds, true_labels)
+ #   prin#t("\n=== Community‑detection accuracy ===")
+ #   for #k, v in stats.items():
+ #       #print(f"{k:>25s} : {v}")
