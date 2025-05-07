@@ -1,15 +1,23 @@
 from experiments.community_detection.bp.vectorized_geometric_bp import (
     get_true_communities,
-    belief_propagation,
     detection_stats
 )
-from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+# from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
 
-from experiments.community_detection.bp.vectorized_bayes import BayesianGraphInference
-from experiments.observations.sparsity import calc_num_pairs
-from experiments.community_detection.bp.gbm_bp import create_observed_subgraph
 import numpy as np
 import networkx as nx
+
+from experiments.community_detection.bp.duo_bp import (
+    create_dist_observed_subgraph,
+    duo_bp
+)
+from experiments.community_detection.bp.bethe_duo_bp import (
+    bethe_duo_bp
+)
+
+import os
+import json
+import logging
 
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
@@ -22,8 +30,19 @@ def coords_str2arr(G: nx.Graph, dim = 16):
             coord_arr = np.zeros(dim)
         G.nodes[n]["coords"] = coord_arr
     return G
+
 if __name__ == "__main__":
-    import json
+    import google.cloud.logging
+    from google.cloud.logging.handlers import CloudLoggingHandler
+    import logging
+
+    client = google.cloud.logging.Client()
+
+    handler = CloudLoggingHandler(client)
+
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger().addHandler(handler)
+    
     G = nx.read_gml("amazon_metadata_test/amazon_graph_videoDVD.gml")
     G = coords_str2arr(G)
 
@@ -40,18 +59,18 @@ if __name__ == "__main__":
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
     
-    def weight_func(c1, c2): 
-        return 1.0
+    # def weight_func(c1, c2): 
+    #     return 1.0
     
-    observations = {}
-    for sparsity in [0.01, 0.025, 0.05]: 
-        num_pairs = calc_num_pairs(G, scale_factor = sparsity)
-        sampler = PairSamplingObservation(G, num_samples = num_pairs, weight_func = weight_func, seed = 42) 
-        observations[str(sparsity)] = sampler.observe()
+    # observations = {}
+    # for sparsity in [0.01, 0.025, 0.05]: 
+    #     num_pairs = calc_num_pairs(G, scale_factor = sparsity)
+    #     sampler = PairSamplingObservation(G, num_samples = num_pairs, weight_func = weight_func, seed = 42) 
+    #     observations[str(sparsity)] = sampler.observe()
 
 
 
-    json.dump(observations, open("amazon_metadata_test/observations_025_05_01.json", "w"))
+    # json.dump(observations, open("amazon_metadata_test/observations_025_05_01.json", "w"))
 
     # all_nodes_ok = True
     # for n in G.nodes():
@@ -72,51 +91,62 @@ if __name__ == "__main__":
     # sampler = PairSamplingObservation(G, num_samples=num_pairs, weight_func=weight_func, seed=42)
     # observations = sampler.observe()
     # json.dump(observations, open("amazon_metadata_test/observations_01.json", "w"))
+    observation_data = json.load(open("amazon_metadata_test/observations_025_05_01.json"))
+    results_folder = "amazon_metadata_test/duo_results/"
+    for sparsity in [0.01, 0.025, 0.05]:
+        observations = observation_data[str(sparsity)]
+        print(f"Found {len(observations)} observations for sparsity {sparsity}")
+        logging.info(f"Found {len(observations)} observations for sparsity {sparsity}")
+        obs_nodes: set[int] = set()
+        for p, _ in observations:
+            obs_nodes.add(p[0])
+            obs_nodes.add(p[1])
+            
+        subG_duo = create_dist_observed_subgraph(G.number_of_nodes(), observations)
+        subG_bethe = create_dist_observed_subgraph(G.number_of_nodes(), observations)
+        print("Created subgraph for sparsity", sparsity)
+        logging.info(f"Created subgraph for sparsity {sparsity}")
+        res_duo = duo_bp(subG_duo,
+                     K=2,
+                     num_balls=32)
+        
+        print("Finished duo_bp for sparsity", sparsity)
+        logging.info(f"Finished duo_bp for sparsity {sparsity}")
+        res_bethe = bethe_duo_bp(subG_bethe,
+                     K=2,
+                     num_balls=32)
+        
+        print("Finished bethe_duo_bp for sparsity", sparsity)
+        logging.info(f"Finished bethe_duo_bp for sparsity {sparsity}")
+        preds_duo = res["communities"]
+        preds_bethe = res_bethe["communities"]
+        
+        true_communities = get_true_communities(G, attr="comm")
+        
+        stats_duo = detection_stats(preds_duo, true_communities)
+        stats_bethe = detection_stats(preds_bethe, true_communities)
+        
+        logging.info(f"Finished detection stats for sparsity {sparsity}")
+        
+        results_dict = {
+            "duo_bp": {
+                "stats": stats_duo,
+                "preds": preds_duo
+            },
+            "bethe_duo_bp": {
+                "stats": stats_bethe,
+                "preds": preds_bethe
+            },
+            "obs_nodes": obs_nodes
+        }
+        with open(os.path.join(results_folder, f"results_{sparsity}.json"), "w") as f:
+            json.dump(results_dict, f)
+        
+        print(f"Saved results for sparsity {sparsity} to {results_folder}")
+        logging.info(f"Saved results for sparsity {sparsity} to {results_folder}")
+        
+            
+        
+            
+        
 
-
-    print(f"Created {len(observations)} observations")
-    #obs_nodes: set[int] = set()
-    #for u, v in observations:
-     #       obs_nodes.add(u)
-      #      obs_nodes.add(v)
-   # print("Beginning Bayesian Inference")
-    #bayes = BayesianGraphInference(
-    #    observations=observations,
-     #   observed_nodes=obs_nodes,
-      #  total_nodes=G.number_of_nodes(),
- #       #obs_format="base",
- #       #n_candidates=2 ** 20,
- #       #seed=42,
- #   )
- #   G_pr#ed = bayes.infer()
- #   prin#t("Finished Bayesian Inference")
- #   subG# = create_observed_subgraph(G.number_of_nodes(), observations)
- #   for #n in subG.nodes():
- #       #subG.nodes[n]["coord"] = G_pred.nodes[n]["coord"]
-
- #   gamm#a = 1.0
- #   K = #4
- #   for #g in (G_pred, subG):
- #       #for u, v in g.edges():
- #       #    d = np.linalg.norm(G_pred.nodes[u]["coord"] - G_pred.nodes[v]["coord"])
- #       #    psi = np.ones((K, K))
- #       #    np.fill_diagonal(psi, np.exp(-gamma * d))
- #       #    #g[u][v]["psi"] = psi
- #   prin#t(G.nodes[0]['comm'])
- #   prin#t("Running Loopy BP …")
- #   _, p#reds, node2idx, idx2node = belief_propagation(
- #       #subG,
- #       #q=K,
- #       #seed=42,
- #       #init_beliefs="spectral",
- #       #message_init="random",
- #       #max_iter=5000,
- #       #damping=0.10,
- #       #balance_regularization=0.01,
- #   )
- #   prin#t("Finished Loopy BP")
- #   true#_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
- #   stat#s = detection_stats(preds, true_labels)
- #   prin#t("\n=== Community‑detection accuracy ===")
- #   for #k, v in stats.items():
- #       #print(f"{k:>25s} : {v}")
