@@ -3,7 +3,7 @@ import networkx as nx
 import numpy as np
 
 from .observe import Observation
-from experiments.graph_generation.generate_graph import distance_function
+from graph_generation.generate_graph import distance_function
 
 
 from typing import List, Tuple, Optional, Any
@@ -11,7 +11,7 @@ import networkx as nx
 import numpy as np
 
 from .observe import Observation
-from experiments.graph_generation.generate_graph import distance_function
+from graph_generation.generate_graph import distance_function
 
 def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0, return_groups=False):
     """
