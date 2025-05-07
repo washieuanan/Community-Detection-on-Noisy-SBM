@@ -26,6 +26,7 @@ if __name__ == "__main__":
     import json
     G = nx.read_gml("amazon_metadata_test/amazon_graph_videoDVD.gml")
     G = coords_str2arr(G)
+
     all_nodes_ok = True
     for n in G.nodes():
         if "comm" not in G.nodes[n]:
@@ -51,6 +52,28 @@ if __name__ == "__main__":
 
 
     json.dump(observations, open("amazon_metadata_test/observations_025_05_01.json", "w"))
+
+    # all_nodes_ok = True
+    # for n in G.nodes():
+    #     if "comm" not in G.nodes[n]:
+    #         print(f"Node {n} is missing the 'comm' attribute.")
+    #         all_nodes_ok = False
+    #     if "coords" not in G.nodes[n]:
+    #         print(f"Node {n} is missing the 'coord' attribute.")
+    #         all_nodes_ok = False
+    # if all_nodes_ok:
+    #     print("All nodes have both 'comm' and 'coord' attributes.")
+    # print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
+    # print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
+    # num_pairs = calc_num_pairs(G, scale_factor=0.1)
+    # def weight_func(c1, c2):
+    #     return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+
+    # sampler = PairSamplingObservation(G, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    # observations = sampler.observe()
+    # json.dump(observations, open("amazon_metadata_test/observations_01.json", "w"))
+
+
     print(f"Created {len(observations)} observations")
     #obs_nodes: set[int] = set()
     #for u, v in observations:
