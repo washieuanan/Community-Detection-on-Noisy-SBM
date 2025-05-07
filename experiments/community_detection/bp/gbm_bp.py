@@ -50,7 +50,7 @@ def get_unique_edges(obs):
     
     return unique_edges
 
-def create_observed_subgraph(num_coords, observations):
+def old_create_observed_subgraph(num_coords, observations):
     """
     create subgraph containing all nodes and observed paths as edges
     """
@@ -61,6 +61,19 @@ def create_observed_subgraph(num_coords, observations):
      
     for u, v in observations:
         subG.add_edge(u, v)
+    return subG
+
+def create_observed_subgraph(num_coords, observations):
+    """
+    create subgraph containing all nodes and observed paths as edges
+    """
+    subG = nx.Graph()
+    
+    for c in range(num_coords):
+        subG.add_node(c)
+    print(observations[0])
+    for u, v, d in observations:  # Unpack the tuple and ignore the distance
+        subG.add_edge(u, v, obs_dist = d)
     return subG
 
 

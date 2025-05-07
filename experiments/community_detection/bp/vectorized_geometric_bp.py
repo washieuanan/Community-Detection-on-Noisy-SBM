@@ -308,4 +308,3 @@ def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000
     )
     stats["perm_p"] = float(res.pvalue)
     return stats
-
