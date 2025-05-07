@@ -10,8 +10,17 @@ import glob
 
 import os
 import glob
+import os
+import glob
 import concurrent.futures
 
+
+import multiprocessing
+
+n_cpus = multiprocessing.cpu_count()
+os.environ['OPENBLAS_NUM_THREADS'] = str(n_cpus)
+os.environ['MKL_NUM_THREADS']      = str(n_cpus)
+os.environ['OMP_NUM_THREADS']      = str(n_cpus)
 
 import multiprocessing
 
@@ -24,10 +33,15 @@ os.environ['OMP_NUM_THREADS']      = str(n_cpus)
 warnings.filterwarnings("ignore", category=UserWarning, module='networkx')
 
 from community_detection.bp.vectorized_geometric_bp import (
+from community_detection.bp.vectorized_geometric_bp import (
     belief_propagation, 
     detection_stats, 
     get_true_communities
+    detection_stats, 
+    get_true_communities
 )
+
+from community_detection.bp.vectorized_bayes import BayesianGraphInference
 
 from community_detection.bp.vectorized_bayes import BayesianGraphInference
 
@@ -149,10 +163,26 @@ def process_file(input_path: str, output_dir: str) -> None:
             subG = create_observed_subgraph(len(G.nodes()), observations)
 
             print(" used here:")
+            print(" used here:")
             for n in subG.nodes(): 
+                subG.nodes[n]['coords'] = predicted_graph.nodes[n]['coords']
                 subG.nodes[n]['coords'] = predicted_graph.nodes[n]['coords']
 
             gamma = 1.0 
+            print("used here 2")
+            # for G_current in (predicted_graph, subG): 
+            #     for u, v in G_current.edges(): 
+            #         d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
+            #         psi = np.ones((k,k))
+            #         np.fill_diagonal(psi, np.exp(-gamma *d)) 
+            #         G_current[u][v]['psi'] = psi 
+            assert len(predicted_graph.nodes()) == len(G.nodes()), "Predicted graph and original graph have different number of nodes"
+            assert all(['coords' in predicted_graph.nodes[n] for n in range(len(G.nodes()))]), "Predicted graph has None coordinates"
+            for u, v in subG.edges():
+                d = np.linalg.norm(predicted_graph.nodes[u]['coords'] - predicted_graph.nodes[v]['coords'])
+                psi = np.ones((k,k))
+                np.fill_diagonal(psi, np.exp(-gamma *d)) 
+                subG[u][v]['psi'] = psi
             print("used here 2")
             # for G_current in (predicted_graph, subG): 
             #     for u, v in G_current.edges(): 
@@ -171,6 +201,8 @@ def process_file(input_path: str, output_dir: str) -> None:
             print("  Running belief propagation...")
             
             _, preds, node2idx, idx2node = belief_propagation(
+            
+            _, preds, node2idx, idx2node = belief_propagation(
                 subG,
                 q=parameters.get('K'),
                 seed=parameters.get('seed'),
@@ -185,7 +217,15 @@ def process_file(input_path: str, output_dir: str) -> None:
             # Retrieve predictions
             # print("  Getting predictions...")
             # marginals, preds = get_marginals_and_preds(subG)
+            # print("  Getting predictions...")
+            # marginals, preds = get_marginals_and_preds(subG)
 
+            # # True community labels from original graph
+            # true = nx.get_node_attributes(G, 'comm')
+            # true = np.array(list(true.values()))
+
+            true = get_true_communities(G, node2idx=node2idx, attr='comm')
+        
             # # True community labels from original graph
             # true = nx.get_node_attributes(G, 'comm')
             # true = np.array(list(true.values()))
@@ -245,6 +285,17 @@ def main():
             process_file(path, output_dir)
         except Exception as e:
             print(f"❌ Error processing {base}: {e}")
+    # Grab every .json in input_dir
+    input_paths = sorted(glob.glob(os.path.join(input_dir, '*.json')))
+    print(f"→ Found {len(input_paths)} JSON files to process.")
+
+    for path in input_paths:
+        base = os.path.basename(path)
+        print(f"\n--- Processing {base} ---")
+        try:
+            process_file(path, output_dir)
+        except Exception as e:
+            print(f"❌ Error processing {base}: {e}")
 
     print("\n✅ All processing completed!")
 
@@ -253,6 +304,11 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
 
 
 

@@ -90,117 +90,6 @@ class PairSamplingObservation(Observation):
 
 
 
-class OldPairSamplingObservation(Observation):
-    """
-    Samples vertex pairs uniformly (or with a weight function) *within*
-    each connected component and records the distance for every sample.
-    Samples vertex pairs uniformly or via a provided weight function,
-    ensuring there exists a path between them.
-    """
-
-    def __init__(self,
-                 graph: nx.Graph,
-                 num_samples: int,
-                 weight_func=None,
-                 seed: int | None = None):
-        super().__init__(graph, seed)
-        self.num_samples = int(num_samples)
-        self.weight_func = weight_func
-
-        # 1) map every node → its component
-        comps = list(nx.connected_components(graph))
-        self._node2comp: dict[int, set[int]] = {}
-        for comp in tqdm(comps, desc="Components"):
-        self._node2comp = {}
-        for comp in comps:
-            for u in comp:
-                self._node2comp[u] = comp
-
-        # 2) pre‑build candidate pairs, distances, and weights
-        pairs, dists, weights = [], [], []
-        for comp in tqdm(comps, desc="Building pairs"):
-        # --- 2) Build candidate pairs & normalized weight array ONCE ---
-        pairs: List[Tuple[int,int]] = []
-        weights: List[float] = []
-        for comp in comps:
-            comp_nodes = list(comp)
-            for i in range(len(comp_nodes)):
-                u = comp_nodes[i]
-                for v in comp_nodes[i + 1:]:
-                    pairs.append((u, v))
-                    cu, cv = graph.nodes[u]["coords"], graph.nodes[v]["coords"]
-                    dists.append(get_coordinate_distance(cu, cv))
-                    weights.append(
-                        weight_func(cu, cv) if weight_func else 1.0
-                    )
-
-        # turn weights into a probability vector if anything non‑zero
-        w = np.asarray(weights, dtype=float)
-        w /= w.sum() if w.sum() else 1.0
-
-        self._pairs: list[tuple[int, int]] = pairs
-        self._distances: list[float] = dists
-        self._weights: np.ndarray = w
-        self.count = 0                       # will be set in observe()
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-    def observe(self) -> list[tuple[tuple[int, int], float]]:
-        """
-        Return a list whose elements look like
-            ((u, v), distance_uv)
-        The list’s length equals ``self.num_samples``.
-        """
-        idx = self.rng.choice(len(self._pairs),
-                              size=self.num_samples,
-                              replace=True,
-                              p=self._weights)
-
-        obs: list[tuple[tuple[int, int], float]] = []
-        for i in tqdm(idx, desc="Sampling observations"):
-            pair = self._pairs[i]
-            dist = float(self._distances[i])
-            obs.append((pair, dist))
-
-        # --- unique‐edge count (order‐insensitive) -------------------- #
-        # pull out just the pair endpoints → homogeneous (N, 2) array
-        pair_arr = np.array([sorted(pair) for pair, _ in obs], dtype=int)
-        self.count = len(np.unique(pair_arr, axis=0))
-
-                    if weight_func:
-                        cu = graph.nodes[u].get("coords")
-                        cv = graph.nodes[v].get("coords")
-                        weights.append(weight_func(cu, cv))
-                    else:
-                        weights.append(1.0)
-
-        w = np.array(weights, dtype=float)
-        if w.sum() > 0:
-            w /= w.sum()
-
-        self._pairs = pairs
-        self._weights = w
-        self.count = 0
-
-    def observe(self) -> List[Tuple[int, int]]:
-        # Pure NumPy sampling, no networkx calls here
-        idx = self.rng.choice(
-            len(self._pairs),
-            size=self.num_samples,
-            replace=True,
-            p=self._weights
-        )
-        obs = [self._pairs[i] for i in idx]
-        self.observations = obs
-        return obs
-
-    def get_count(self) -> int:
-        """Number of *distinct* edges observed (order‑agnostic)."""
-        return self.count
-
-
-
 # class PairSamplingObservation(Observation):
 #     """
 #     Samples vertex pairs uniformly or via a provided weight function,
@@ -354,7 +243,6 @@ if __name__ == "__main__":
     # )
 
     from graph_generation.gbm import generate_gbm
-    from graph_generation.gbm import generate_gbm
 
     G2 = generate_gbm(
         n=300,
@@ -378,8 +266,6 @@ if __name__ == "__main__":
     # Vertex-based sampling
     # vertex_sampler = VertexBasedSamplingObservation(G2, weight_func=weight_func, seed=42)
     # vertex_observations = vertex_sampler.observe()
-    # vertex_sampler = VertexBasedSamplingObservation(G2, weight_func=weight_func, seed=42)
-    # vertex_observations = vertex_sampler.observe()
 
     # print("\nVertex-based observations:")
     # print(f"Total observations: {len(vertex_observations)}")
@@ -394,8 +280,6 @@ if __name__ == "__main__":
     # from collections import Counter
    
     print("pair-sampling count: ", pair_sampler.get_count())
-    # print("vertex-sampling count: ", vertex_sampler.get_count())
-    # print("sparsity w/ vertex", vertex_sampler.get_count() / (len(G2.edges) * len(G2.nodes)))
     # print("vertex-sampling count: ", vertex_sampler.get_count())
     # print("sparsity w/ vertex", vertex_sampler.get_count() / (len(G2.edges) * len(G2.nodes)))
     print(len(G2.edges))
