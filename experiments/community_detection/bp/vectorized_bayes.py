@@ -28,6 +28,7 @@ class BayesianGraphInference:
         dim: int = 3,
         n_candidates: int = 2 ** 20,
         seed: int | None = None,
+        num_categories: int = 10
     ) -> None:
         self.rng = np.random.default_rng(seed)
         self.obs = observations
@@ -51,8 +52,9 @@ class BayesianGraphInference:
 
         # Build likelihood matrix once
         self._build_pair_likelihood_matrix()
+        self.num_categories = num_categories
+        self.radii_splits = np.linspace(1/num_categories, 1.0, num_categories, endpoint=True)
 
-    
     def _split_sphere(self, n_candidates: int) -> Tuple[np.ndarray, float]:
         """Return (centers, radius) using k‑means++ seeding inside unit ball."""
         sobol = qmc.Sobol(self.d, scramble=False, seed=0)
@@ -78,7 +80,38 @@ class BayesianGraphInference:
         radius = float(np.sqrt(closest2.max()))
         return centres, radius
 
+    def _split_cluster_radii(self):
+        """Split the cluster centers into num_categories intervals."""
+        radii_assignments = np.zeros(self.num_grids, dtype=int)
+        for i in range(self.num_categories - 1):
+            in_category_radii = np.where((np.linalg.norm(self.centers, axis=1) < self.radii_splits[i+1])
+                                         & (np.linalg.norm(self.centers, axis=1) >= self.radii_splits[i]))
+            radii_assignments[in_category_radii] = i
+        return radii_assignments
    
+    def _split_nodes_by_degree(self):
+        """split nodes into num_categories intervals based on degree"""
+        degrees = np.array([len(self.obs_dict.get(node, [])) for node in range(self.n)])
+        sorted_idx = np.argsort(degrees)
+        category_volumes = np.zeros(self.num_categories)
+        for i in range(self.num_categories - 1):
+            vol = 4/3 * np.pi * self.radii_splits[i]**3
+            if i > 0:
+                vol -= category_volumes[i-1]
+            category_volumes[i] = vol
+        # Determine the number of nodes in each category based on volumes.
+        counts = (category_volumes * self.n).astype(int)
+        # Adjust counts so their sum equals self.n (due to rounding)
+        diff = self.n - counts.sum()
+        counts[-1] += diff
+        node_categories = np.empty(self.n, dtype=int)
+        start = 0
+        for cat in range(self.num_categories):
+            end = start + counts[cat]
+            node_categories[sorted_idx[start:end]] = cat
+            start = end
+        return node_categories
+        
     def _process_observations_base(self) -> Dict[int, Set[int]]:
         obs_dict = {o_n: set() for o_n in self.obs_nodes}
         for u, v in self.obs:
@@ -114,7 +147,13 @@ class BayesianGraphInference:
 
    
     def _initialize_priors(self) -> None:
+        radii_assignments = self._split_cluster_radii()
+        node_categories = self._split_nodes_by_degree()
         self.priors = self.rng.normal(loc=1.0, scale=0.1, size=(self.n, self.num_grids))
+        bias_value = 1.0  # Adjust the bias strength as needed
+        for i in range(self.n):
+            assigned_cat = node_categories[i]
+            self.priors[i, radii_assignments == assigned_cat] += bias_value
         self.priors /= self.priors.sum(axis=1, keepdims=True)
 
     def _update_posteriors(self, u: int, v: int) -> None:
@@ -130,7 +169,7 @@ class BayesianGraphInference:
         self.priors[[u, v]] /= self.priors[[u, v]].sum(axis=1, keepdims=True)
 
     
-    def _build_obs_sequence(self, epochs: int = 20) -> np.ndarray:
+    def _build_obs_sequence(self, epochs: int = 1000) -> np.ndarray:
         all_pairs = np.array(
             [(u, v) for u in self.obs_nodes for v in self.obs_dict[u]], dtype=int
         )
@@ -213,7 +252,7 @@ if __name__ == "__main__":
     G_true = generate_gbm(n=500, K=3, a=100, b=50, seed=123)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.025 * original_density
+    C = 0.01 * original_density
 
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
