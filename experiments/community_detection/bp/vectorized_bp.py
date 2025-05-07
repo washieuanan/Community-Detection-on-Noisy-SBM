@@ -34,7 +34,9 @@ def build_arrays(G: nx.Graph):
 # -----------------------------------------------------------------------------
 
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
-    vals, vecs = sla.eigs(nx.adjacency_matrix(G), k=q, which="LM", tol=1e-2)
+    # Make sure the adjacency matrix uses a valid dtype for eigs
+    adj_mat = nx.adjacency_matrix(G).astype(np.float64)
+    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-2)
     km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
     return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
 
@@ -158,6 +160,16 @@ def belief_propagation(
     """Vectorised BP that reproduces the exact math/logic of the reference loop."""
 
     rng = np.random.default_rng(seed)
+    
+    # Check if the graph has enough edges to run BP
+    if G.number_of_edges() < 1:
+        print("[BP] Warning: Graph has no edges, returning random beliefs")
+        node2idx = {u: i for i, u in enumerate(G)}
+        idx2node = {i: u for u, i in node2idx.items()}
+        n = len(node2idx)
+        beliefs = init_beliefs(n, q, rng)
+        preds = beliefs.argmax(1)
+        return beliefs, preds, node2idx, idx2node
 
     # ---------------------------------------------------------------------
     #  Pre‑compute arrays & constants
@@ -214,12 +226,17 @@ def belief_propagation(
         # --------------------------------------------------------------
         #  Message update  (vectorised reference equation)
         # --------------------------------------------------------------
-        messages_new = np.exp(
-            -beta * deg[src, None] * theta / (2.0 * m) +   # term1
-            S[src] -                                       # Σ over neighbours except dst
-            log_fac[rev] -                                 # subtract k→i contribution
-            balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
-        )
+        # Safe handling of zero edge case
+        if m > 0:
+            messages_new = np.exp(
+                -beta * deg[src, None] * theta / (2.0 * m) +   # term1
+                S[src] -                                       # Σ over neighbours except dst
+                log_fac[rev] -                                 # subtract k→i contribution
+                balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
+            )
+        else:
+            # If m=0, provide a fallback to prevent division by zero
+            messages_new = np.ones_like(messages_old)
         messages_new /= messages_new.sum(1)[:, None]
 
         # Damp
@@ -228,7 +245,22 @@ def belief_propagation(
         # --------------------------------------------------------------
         #  Convergence check & optional entropy‑based noise reinjection
         # --------------------------------------------------------------
-        delta = np.max(np.abs(messages - messages_old))
+        if messages.size == 0:  # Safeguard against empty message arrays
+            print("[BP] Warning: Empty message arrays detected, aborting loop")
+            delta = 0.0
+            break
+        
+        # Protected maximum calculation
+        try:
+            delta = np.max(np.abs(messages - messages_old))
+        except ValueError as e:
+            if "zero-size array" in str(e):
+                print("[BP] Warning: Zero-size array in delta calculation, aborting loop")
+                delta = 0.0
+                break
+            else:
+                raise
+                
         convergence_history.append(float(delta))
 
         if delta < tol and it >= min_steps:
