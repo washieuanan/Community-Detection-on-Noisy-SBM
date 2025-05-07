@@ -228,8 +228,8 @@ def process_file(input_path: str, output_dir: str) -> None:
 
 
 def main():
-    input_dir  = 'datasets/observations_generation/gbm_observation_005'
-    output_dir = 'results/bayes_bp_05_05_results/005'
+    input_dir  = 'datasets/observations_generation/gbm_observation_0005'
+    output_dir = 'results/bayes_bp_05_05_results/0005'
 
     os.makedirs(output_dir, exist_ok=True)
     print(f"✅ Output directory created/verified: {output_dir}")

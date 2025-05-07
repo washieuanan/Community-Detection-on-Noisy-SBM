@@ -1,6 +1,6 @@
 # imports 
 
-from experiments.community_detection.bp.belief_prop import (
+from community_detection.bp.belief_prop import (
     detection_stats,
     initialize_beliefs,
     get_marginals_and_preds,
@@ -9,7 +9,7 @@ from experiments.community_detection.bp.belief_prop import (
     get_true_communities
 )
 
-from experiments.graph_generation.generate_graph import (
+from graph_generation.generate_graph import (
     generate_latent_geometry_graph,
     NUM_VERTICES_CLUSTER_1,
     NUM_VERTICES_CLUSTER_2,
@@ -19,8 +19,8 @@ from experiments.graph_generation.generate_graph import (
 import numpy as np
 import networkx as nx
 
-from experiments.observations.random_walk_obs import random_walk_observations
-from experiments.observations.sensor_observe import sensor_observations, gather_multi_sensor_observations, pick_sensors
+from observations.random_walk_obs import random_walk_observations
+from observations.sensor_observe import sensor_observations, gather_multi_sensor_observations, pick_sensors
 
 def get_unique_edges(obs):
     """
@@ -50,7 +50,7 @@ def get_unique_edges(obs):
     
     return unique_edges
 
-def create_observed_subgraph(num_coords, observations):
+def old_create_observed_subgraph(num_coords, observations):
     """
     create subgraph containing all nodes and observed paths as edges
     """
@@ -61,6 +61,19 @@ def create_observed_subgraph(num_coords, observations):
      
     for u, v in observations:
         subG.add_edge(u, v)
+    return subG
+
+def create_observed_subgraph(num_coords, observations):
+    """
+    create subgraph containing all nodes and observed paths as edges
+    """
+    subG = nx.Graph()
+    
+    for c in range(num_coords):
+        subG.add_node(c)
+    print(observations[0])
+    for u, v, d in observations:  # Unpack the tuple and ignore the distance
+        subG.add_edge(u, v, obs_dist = d)
     return subG
 
 

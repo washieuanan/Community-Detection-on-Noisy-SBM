@@ -202,7 +202,7 @@ class BayesianGraphInference:
 
 if __name__ == "__main__":
     from graph_generation.gbm import generate_gbm
-    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from observations.standard_observe import OldPairSamplingObservation, get_coordinate_distance
     from community_detection.bp.vectorized_geometric_bp import (
         belief_propagation,
         detection_stats,
@@ -213,13 +213,13 @@ if __name__ == "__main__":
     G_true = generate_gbm(n=500, K=3, a=100, b=50, seed=123)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.15 * original_density
+    C = 0.025 * original_density
 
     def weight_func(c1, c2):
         return np.exp(-0.5 * get_coordinate_distance(c1, c2))
 
     num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    sampler = OldPairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
     observations = sampler.observe()
 
     obs_nodes: Set[int] = set()
@@ -239,9 +239,9 @@ if __name__ == "__main__":
     G_pred = bayes.infer()
 
     # Build subgraph of observed nodes with inferred coords (for BP)
-    from community_detection.bp.gbm_bp import create_observed_subgraph
+    from community_detection.bp.gbm_bp import old_create_observed_subgraph
 
-    subG = create_observed_subgraph(G_true.number_of_nodes(), observations)
+    subG = old_create_observed_subgraph(G_true.number_of_nodes(), observations)
     for n in subG.nodes():
         subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
 

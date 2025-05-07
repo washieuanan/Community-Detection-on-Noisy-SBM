@@ -168,12 +168,12 @@ def belief_propagation(
     balance_regularization: float = 0.10,
     seed: int = 0,
     min_steps: int = 0,
-    init: Literal["random", "spectral"] = "random",
+    init: Literal["random", "spectral"] = "spectral",
     msg_init: Literal["random", "copy", "pre-group"] = "random",
     group_obs: List | None = None,
     min_sep: float | None = None,
     eps: float = 0.1,
-    mode: Literal["sbm", "dc"] = "sbm",
+    mode: Literal["sbm", "dc"] = "dc",
 ):
     """Vectorised BP that reproduces the exact math/logic of the reference loop."""
 
@@ -227,11 +227,20 @@ def belief_propagation(
         beliefs[:] = np.exp(S - S.max(1)[:, None])
         beliefs /= beliefs.sum(1)[:, None]
 
+        if it < 100:                              # only during the first few rounds
+            iso_mask = deg == 0                  # vertices with *observed* degree 0
+            if iso_mask.any():
+                # mix 1 % of the uniform distribution into their current belief
+                beliefs[iso_mask] = (
+                    0.99 * beliefs[iso_mask] + 0.02 / q
+                )   # theta
         # --------------------------------------------------------------
         #  Community sizes & theta (same formulas)
         # --------------------------------------------------------------
         comm_sz = beliefs.mean(0)                          # community_sizes
-        theta = (deg[:, None] * beliefs).sum(0)            # theta
+        theta = (deg[:, None] * beliefs).sum(0)         
+        
+        
 
         # --------------------------------------------------------------
         #  Message update  (vectorised reference equation)
@@ -343,7 +352,7 @@ if __name__ == "__main__":
     )
 
     # Generate latent GBM graph
-    G_true = generate_gbm(n=700, K=2, a=72, b=20, seed=123)
+    G_true = generate_gbm(n=700, K=3, a=75, b=20, seed=42)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
     C = 0.025 * original_density
@@ -377,7 +386,7 @@ if __name__ == "__main__":
         init="spectral",
         msg_init="random",
         max_iter=5000,
-        damping=0.15,
+        damping=0.27,
         balance_regularization=0.05,
         mode="dc",
     )

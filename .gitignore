@@ -94,3 +94,5 @@ data/
 
 # Graph files
 *.gml
+
+*.zip
