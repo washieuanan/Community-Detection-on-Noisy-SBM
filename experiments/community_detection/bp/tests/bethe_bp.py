@@ -49,7 +49,10 @@ def bethe_hessian_embedding(G: nx.Graph, q: int):
     r = np.sqrt(max(k.mean(), 1e-8))
     I = sp.eye(A.shape[0], format="csr", dtype=float)   
     H = (r ** 2 - 1) * I - r * A + sp.diags(k, format="csr")
-    vals, vecs = sla.eigsh(H, k=q, which="SM", tol=1e-2)
+    
+    
+    ncv = min(H.shape[0], max(2*q+1, 10*q))
+    vals, vecs = sla.eigsh(H, k=q, which="SM", tol=1e-2, ncv = ncv)
     return np.real(vecs)
 
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
