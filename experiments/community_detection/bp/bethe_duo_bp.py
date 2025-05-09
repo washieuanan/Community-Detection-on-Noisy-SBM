@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.tests.bethe_bp import belief_propagation
+from experiments.community_detection.bp.tests.bethe_bp import belief_propagation
 from collections import defaultdict
-from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 
 # def belief_propagation(
