@@ -60,11 +60,9 @@ def parse_amazon_meta(path):
                     cat_lines_to_read = 0
 
             elif cat_lines_to_read > 0:
-                # each line is something like:
-                #  |Books[283155]|Subjects[1000]|…|
-                # extract tokens between pipes, drop the “[num]”
-                for token in re.findall(r'\|([^|\[]+)\[\d+\]', line):
-                    categories.append(token)
+                tokens = re.findall(r'\|([^|\[]+)\[\d+\]', line)
+                if tokens:
+                    categories.append(tokens[-1])
                 cat_lines_to_read -= 1
 
             # ignore everything else (title, salesrank, reviews, etc.)
