@@ -85,3 +85,5 @@ data/
 
 # Graph files
 *.gml.DS_Store
+
+*.pyc
