@@ -53,69 +53,79 @@ def sample_parameter(n_range, K_list,  a_range, b_range):
 
 def generate_dataset(output_dir: str, 
                      num_graphs: int = 500, 
-                    n_range=None, 
-                    K_list=None, 
-                    a_range=None, 
-                    b_range=None): 
-    n_range = n_range or range(100, 1000, 50) 
-    K_list = K_list or [2] 
-    a_range = a_range or range(50, 501, 50) 
-    b_range = b_range or range(10, 301, 10) 
+                     n_range=None, 
+                     K_list=None, 
+                     a_range=None, 
+                     b_range=None):
+    n_range   = n_range   or range(100, 1000, 50)
+    K_list    = K_list    or [2]
+    a_range   = a_range   or range(50, 501, 50)
+    b_range   = b_range   or range(10, 301, 10)
+    os.makedirs(output_dir, exist_ok=True)
 
-    os.makedirs(output_dir, exist_ok=True) 
+    # Define sparsities; ensure 0.05 is first / max
+    sparsities = [0.05, 0.01, 0.005, 0.0025, 0.001]
 
-    count = 0 
-    seed = 0 
-    sparsities = [0.01, 0.02, 0.03, 0.04, 0.05, 0.1]
+    count = 0
+    seed  = 0
 
-    while count < num_graphs: 
-        n, K, a, b = sample_parameter(n_range, K_list, a_range, b_range) 
-        if verify_a_b(a,b) and verify_n(n, K): 
-            G = generate_gbm(n = n, K = K, a = a, b = b, seed = seed)
-            epsilon_threshold = calculate_epsilon_threshold(a, b, K, n)
-            data = json_graph.node_link_data(G) 
+    while count < num_graphs:
+        # randomly pick parameters
+        n, K, a, b = sample_parameter(n_range, K_list, a_range, b_range)
+        if not (verify_a_b(a, b) and verify_n(n, K)):
+            seed += 1
+            continue
 
-            def weight_func(c1, c2): 
-                return 1.0
-            # Now, we will generate observations for each sparsity level
+        # generate GBM
+        G = generate_gbm(n=n, K=K, a=a, b=b, seed=seed)
+        epsilon_threshold = calculate_epsilon_threshold(a, b, K, n)
+        data = json_graph.node_link_data(G)
 
-            observations_data = {}
-            for sparsity in sparsities: 
-                num_pairs = int(sparsity * n ** 2 / 2)
-                obs = PairSamplingObservation(G, num_samples=num_pairs, weight_func=weight_func, seed=seed)
-                observations = obs.observe()
-                observations_data[sparsity] = observations
-                
+        # compute density
+        avg_deg = np.mean(list(dict(G.degree()).values()))
+        orig_density = avg_deg / n
 
-            record = {
-                'parameters': {'n': n, 'K': K, 'a': a, 'b': b, 'epsilon_threshold': epsilon_threshold, 'seed': seed}, 
-                'graph': data, 
-                'observations': observations_data
-            }
+        # prepare RNG
+        rng = np.random.default_rng(seed)
 
-            filename = os.path.join(output_dir, f'graph_{count+1:03d}.json')    
-            with open(filename, 'w') as f:
-                json.dump(record, f) 
-            count += 1 
-        seed += 1
+        # first, full obs at max sparsity = 0.05
+        max_s = sparsities[0]
+        C_full    = max_s * orig_density
+        num_full  = int((C_full * n**2) / 2)
+        obs_full  = PairSamplingObservation(G, num_samples=num_full,
+                                            weight_func=lambda u,v: 1.0,
+                                            seed=seed).observe()
 
+        # now downsample for lower sparsities
+        observations_data = { }
+        observations_data[max_s] = obs_full
 
-if __name__ == "__main__": 
-    generate_dataset("datasets/NEW_gbm_w_observations", num_graphs=500)
+        for s in sparsities[1:]:
+            frac      = s / max_s
+            sample_sz = int(len(obs_full) * frac)
+            # choose without replacement
+            idxs      = rng.choice(len(obs_full),
+                                    size=sample_sz,
+                                    replace=False)
+            observations_data[s] = [obs_full[i] for i in idxs]
 
+        # write out
+        record = {
+            'parameters': {
+                'n': n, 'K': K, 'a': a, 'b': b,
+                'epsilon_threshold': epsilon_threshold,
+                'seed': seed
+            },
+            'graph': data,
+            'observations': observations_data
+        }
 
+        fname = os.path.join(output_dir, f'graph_{count+1:03d}.json')
+        with open(fname, 'w') as f:
+            json.dump(record, f)
 
+        count += 1
+        seed  += 1
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    generate_dataset("datasets/fixed_gbm_w_observations", num_graphs=500)
