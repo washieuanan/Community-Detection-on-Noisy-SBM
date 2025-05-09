@@ -113,6 +113,8 @@ def main():
     json_files = sorted(glob.glob(os.path.join(input_dir, '*.json')))
     print(f"Found {len(json_files)} files in {input_dir}")
 
+    # start after json 112
+    json_files = json_files[457:]
     for path in json_files:
         process_file(path, output_dir)
 
