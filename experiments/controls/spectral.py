@@ -1,47 +1,128 @@
 import networkx as nx
 import numpy as np
-from scipy.sparse import csgraph
+from scipy.sparse import diags
+from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
+from scipy.sparse import csgraph
 
-from graph_generation.generate_graph import generate_latent_geometry_graph
-from observations.random_walk_obs import random_walk_observations
-from observations.observe import get_coordinate_distance
-
-def spectral_embedding_clustering(G, observations, k):
+def bethe_hessian_clustering(G, observations, q, use_nonbacktracking=False):
     """
-    Spectral embedding + k-means clustering on observed edges.
+    Community detection via the Bethe–Hessian operator on a weighted graph.
 
     Parameters
     ----------
     G : networkx.Graph
         The full set of vertices (possibly without all edges observed).
-    observations : list of (u, v)
-        Observed edges between nodes u and v.
-    k : int
-        Number of communities to find.
+    observations : list of (u, v, d_uv)
+        Observed pairs with their Euclidean distance.
+    q : int
+        Number of communities.
+    use_nonbacktracking : bool
+        If True, estimate r from the non‐backtracking operator; else use sqrt(mean degree).
 
     Returns
     -------
-    dict
-        Mapping node -> community label in {0,1,...,k-1}.
+    np.ndarray
+        Array of length n, where entry i is the community label of node i.
     """
-    # Build a graph H containing only edges from observation
+    # 1) build weighted adjacency from (u, v, d)
+    dists = np.array([d for (u,v), d in observations])
+    sigma = np.median(dists) or 1.0
+    weight = lambda d: np.exp(-0.5 * (d / sigma) ** 2)
+
     H = nx.Graph()
     H.add_nodes_from(G.nodes())
-    H.add_edges_from(observations)
+    H.add_weighted_edges_from([(u, v, weight(d)) for (u, v), d in observations], weight="w")
 
-    # Get the Laplacian matrix as a sparse array, with rows/cols in the order of G.nodes
+    # 2) form adjacency A and degree diagonal D
+    nodes = list(G.nodes())
+    A = nx.to_scipy_sparse_array(H, nodelist=nodes, format="csr", weight="w")
+    deg = np.array(A.sum(axis=1)).ravel()
+    D = diags(deg)
+
+    # 3) choose parameter r
+    if use_nonbacktracking:
+        # Placeholder for non-backtracking estimate:
+        # compute leading eigenvalue rho of the non-backtracking matrix B, then:
+        # r = np.sqrt(rho)
+        raise NotImplementedError("Non-backtracking estimate not yet implemented")
+    else:
+        r = np.sqrt(deg.mean())
+
+    # 4) form the Bethe–Hessian H(r)
+    n = len(nodes)
+    I = diags([1.0] * n)
+    Hr = (r * r - 1) * I - r * A + D
+
+    # 5) find the q eigenvectors of H(r) with the most negative eigenvalues
+    vals, vecs = eigsh(-Hr, k=q, which="LA")
+    labels_sub = vecs  # Not used directly, but km.labels_ refers to this embedding
+
+    # 6) cluster in that embedding space
+    km = KMeans(n_clusters=q, random_state=42).fit(vecs)
+    labels_sub = km.labels_
+
+    # 7) format labels exactly as requested:
+    nodes_sub = nodes
+    n_sub = len(nodes_sub)
+    labels = {nodes_sub[i]: int(labels_sub[i]) for i in range(n_sub)}
+
+    rng = np.random.default_rng()
+    other_nodes = set(G.nodes()) - set(nodes_sub)
+    for node in other_nodes:
+        labels[node] = int(rng.integers(0, q))
+
+    return np.array([labels[i] for i in range(len(nodes))])
+
+
+def spectral_clustering(G, observations, q):
+    """
+    Community detection via classic spectral clustering on an unweighted graph
+    built from observed vertex‐pairs.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        The full set of vertices.
+    observations : list of (u, v, d_uv)
+        Observed pairs (with distances d_uv, which will be ignored here).
+    q : int
+        Number of communities.
+
+    Returns
+    -------
+    np.ndarray
+        Array of length n, where entry i is the community label of node i.
+    """
+    # 1) build unweighted observation‐graph H
+    H = nx.Graph()
+    H.add_nodes_from(G.nodes())
+    H.add_edges_from([(u, v) for (u, v),  _ in observations])
+
+    # 2) form the normalized Laplacian L
     nodes = list(G.nodes())
     A = nx.to_scipy_sparse_array(H, nodelist=nodes, format="csr")
     L = csgraph.laplacian(A, normed=True)
 
-    _, vecs = np.linalg.eigh(L.toarray())
+    # 3) compute the bottom q eigenvectors of L (skip the trivial zero‐mode)
+    evals, evecs = np.linalg.eigh(L.toarray())
+    X = evecs[:, 1 : q + 1]  # shape = (n_nodes, q)
 
-    X = vecs[:, 1 : k + 1]  # shape = (n_nodes, k)
+    # 4) cluster rows of X with k‐means
+    km = KMeans(n_clusters=q, random_state=42).fit(X)
+    labels_sub = km.labels_
 
-    # Cluster rows of X with k-means
-    km = KMeans(n_clusters=k, random_state=42)
-    km.fit(X)
-    labels = km.labels_
+    # 5) format labels exactly as requested
+    nodes_sub = nodes
+    n_sub = len(nodes_sub)
+    labels = {nodes_sub[i]: int(labels_sub[i]) for i in range(n_sub)}
 
-    return np.array(int(labels[i]) for i in range(len(labels)))
+    # 6) assign random labels for any missing nodes (shouldn't happen here)
+    rng = np.random.default_rng()
+    other_nodes = set(G.nodes()) - set(nodes_sub)
+    for node in other_nodes:
+        labels[node] = int(rng.integers(0, q))
+
+    # 7) return array of labels in node‐index order
+    return np.array([labels[i] for i in range(len(nodes))])
+
