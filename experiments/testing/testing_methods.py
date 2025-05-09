@@ -14,6 +14,11 @@ from community_detection.bp.tests.bethe_duo_bp import duo_bp as bethe_bp
 from community_detection.bp.tests.duo_bp import duo_bp as duo_bp
 from community_detection.bp.vectorized_bp import detection_stats, get_true_communities
 from community_detection.bp.tests.duo_bp import create_dist_observed_subgraph
+from community_detection.bp.vectorized_bp import belief_propagation
+from controls.motif_count import motif_counting
+from controls.spectral import spectral_clustering
+
+
 
 # Set BLAS threading to use all CPUs
 n_cpus = multiprocessing.cpu_count()
@@ -30,9 +35,6 @@ def _json_convert(o):
     if isinstance(o, np.ndarray):
         return o.tolist()
     raise TypeError(f"Type {type(o)} not serializable")
-
-
-
 
 
 def process_file(input_path, output_dir):
@@ -53,7 +55,7 @@ def process_file(input_path, output_dir):
     results = {}
 
     for C_level, obs_data in obs_dict.items():
-        print(f"  Testing C = {C_level}")
+        print(f"  Testing sparsity factor, rho = {C_level}")
         # Extract the list of pairs
         if isinstance(obs_data, dict) and 'observations' in obs_data:
             observations = obs_data['observations']
@@ -71,29 +73,67 @@ def process_file(input_path, output_dir):
         results[C_level] = {}
 
         # Run both BP methods
-        for name, bp_fn in [('bethe', bethe_bp), ('duo', duo_bp)]:
-            print(f"    Running {name}_bp...")
-            # Call the BP function (signature similar to vectorized_bp)
-            res = bp_fn(
-                subG,
-                K=parameters.get('K'),
-                seed=parameters.get('seed')
-            )
+        print("Running duo_bp...")
+        res = duo_bp(
+            subG,
+            K=parameters.get('K'),
+            seed=parameters.get('seed')
+        )
 
-            print(res)
+        # Retrieve true communities aligned by node2idx
+        preds = res["communities"]
+        true_comms = get_true_communities(G_full, node2idx=None, attr='comm')
 
-            # Retrieve true communitie s aligned by node2idx
-            preds = res["communities"]
-            true_comms = get_true_communities(G_full, node2idx=None, attr='comm')
+        # Compute stats
+        stats = detection_stats(preds, true_comms)
 
-            # Compute stats
-            stats = detection_stats(preds, true_comms)
+        # Store
+        results[C_level]['duobp'] = {
+            'stats': stats,
+            'preds': preds
+        }
 
-            # Store
-            results[C_level][name] = {
-                'stats': stats,
-                'preds': preds
-            }
+        print("Running regular belief propagation...") 
+        _, preds, node2idx, _ = belief_propagation(
+            subG, 
+            q = parameters.get('K'), 
+            seed= parameters.get('seed'),
+            balance_regularization=0.05,
+            damping=0.15,
+            msg_init='random',
+            group_obs = None, 
+            max_iter= 5000, 
+            min_sep = 0.3
+        )
+
+        true_comms = get_true_communities(G_full, node2idx=node2idx, attr='comm')
+        stats = detection_stats(preds, true_comms)
+
+        results[C_level]['bp'] = {
+            'stats': stats,
+            'preds': preds
+        }
+
+        # Now, run controls 
+        print("Running motif counting...")
+        preds = motif_counting(subG, q=2)
+
+        true_comms = get_true_communities(G_full, node2idx=None, attr='comm')
+        stats = detection_stats(preds, true_comms)
+
+        results[C_level]['motif'] = {
+            'stats': stats,
+            'preds': preds
+        }
+
+        print("Running spectral clustering...")
+        preds = spectral_clustering(subG, obs_data, q=2)
+        stats = detection_stats(preds, true_comms)
+        results[C_level]['spectral'] = {
+            'stats': stats,
+            'preds': preds
+        }
+
 
     # Write results to JSON
     os.makedirs(output_dir, exist_ok=True)
@@ -106,15 +146,15 @@ def process_file(input_path, output_dir):
 
 
 def main():
-    input_dir = 'datasets/NEW_gbm_w_observations'
-    output_dir = 'results/bethe_testing/'
+    input_dir = 'datasets/fixed_gbm_w_observations'
+    output_dir = 'results/all_methods/'
     os.makedirs(output_dir, exist_ok=True)
 
     json_files = sorted(glob.glob(os.path.join(input_dir, '*.json')))
     print(f"Found {len(json_files)} files in {input_dir}")
 
     # start after json 112
-    json_files = json_files[457:]
+    json_files = json_files[16:]
     for path in json_files:
         process_file(path, output_dir)
 
