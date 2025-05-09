@@ -387,21 +387,21 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from graph_generation.gbm import generate_gbm
+    from graph_generation.gbm import generate_gbm_poisson
     from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     from typing import Set
-    a = 70
-    b = 18
+    a = 100
+    b = 10
     n = 700
-    K = 3
+    K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
-    G_true = generate_gbm(n=n, K=K, a=a, b=b, seed=42)
+    G_true = generate_gbm_poisson(lam=20, K=K, a=a, b=b, seed=42)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.05   * original_density
+    C = 0.01      * original_density
 
     def weight_func(c1, c2):
         # return np.exp(-0.5 * get_coordinate_distance(c1, c2))

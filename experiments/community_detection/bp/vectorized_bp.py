@@ -36,7 +36,8 @@ def build_arrays(G: nx.Graph):
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
     # Make sure the adjacency matrix uses a valid dtype for eigs
     adj_mat = nx.adjacency_matrix(G).astype(np.float64)
-    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-2)
+
+    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-2, ncv=2 * q + 1, maxiter=1000)
     km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
     return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
 

@@ -165,6 +165,77 @@ def plot_gbm(
     plt.show()
 
 
+import numpy as np
+import networkx as nx
+
+def generate_gbm_poisson(
+    lam: float,      # intensity of Poisson PP on unit disk
+    K: int,          # number of communities
+    a: float,        # controls r_in, p_in
+    b: float,        # controls r_out, p_out
+    dim: int = 2,
+    seed: int | None = None
+) -> nx.Graph:
+    """
+    Geometric Block Model with node-locations drawn from 
+    a homogeneous Poisson point process (intensity=lam) on the unit disk.
+    
+    Parameters
+    ----------
+    lam : float
+        Intensity (points per unit area) of the Poisson PP on the unit disk.
+    K : int
+        Number of communities.
+    a, b : float
+        Parameters controlling thresholds and probabilities:
+          r_in  = a * log(N) / N,    p_in  = a * log(N) / N
+          r_out = b * log(N) / N,    p_out = b * log(N) / N
+        Must satisfy sqrt(a) - sqrt(b) > 2*sqrt(2).
+    seed : int | None
+        RNG seed for reproducibility.
+    """
+    if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
+        raise ValueError("Pick a and b such that sqrt(a) - sqrt(b) > 2*sqrt(2)")
+    
+    rng = np.random.default_rng(seed)
+
+    # 1) draw random number of points in unit disk
+    area = np.pi * 1**2
+    N = rng.poisson(lam * area)
+
+    # 2) sample N points uniformly in the disk via polar coords
+    r     = np.sqrt(rng.random(N))
+    theta = 2 * np.pi * rng.random(N)
+    pts = np.column_stack((r * np.cos(theta), r * np.sin(theta)))
+
+    # community assignments
+    comm = rng.integers(0, K, size=N)
+
+    # thresholds & probabilities
+    r_in  = a * np.log(N) / N
+    r_out = b * np.log(N) / N
+    p_in  = a * np.log(N) / N
+    p_out = b * np.log(N) / N
+
+    # build graph
+    G = nx.Graph()
+    for i in range(N):
+        G.add_node(i, coords=(pts[i,0], pts[i,1]), comm=int(comm[i]))
+
+    # add edges
+    for i in range(N):
+        for j in range(i+1, N):
+            d = np.linalg.norm(pts[i] - pts[j])
+            if comm[i] == comm[j]:
+                if d < r_in and rng.random() < p_in:
+                    G.add_edge(i, j)
+            else:
+                if d < r_out and rng.random() < p_out:
+                    G.add_edge(i, j)
+
+    return G
+
+
 
 if __name__ == "__main__": 
     # G = generate_gbm(
