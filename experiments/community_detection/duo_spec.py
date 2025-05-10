@@ -12,121 +12,16 @@ from experiments.community_detection.bp.vectorized_bp import belief_propagation
 from collections import defaultdict
 from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
-
-# def belief_propagation(
-#         G: nx.Graph,
-#         q: int,
-#         *,
-#         beta: float | None = None,
-#         max_iter: int = 1_000,
-#         tol: float = 1e-4,
-#         damping: float = 0.20,
-#         balance_regularization: float = 0.10,
-#         seed: int = 0,
-#         gamma: float = 1.0,
-#         init_beliefs: Literal["random", "spectral"] = "random",
-#         message_init: Literal["random", "copy", "pre-group"] = "random",
-#         group_obs=None,
-#         min_sep=None,
-#         eps: float = 0.1,
-# ):
-#     rng = np.random.default_rng(seed)
-
-
-#     node2idx, idx2node, src, dst, rev = build_arrays(G)
-#     n, m = len(node2idx), src.size // 2
-#     deg  = np.fromiter((G.degree[u] for u in G), dtype=np.int32)
-
-#     # coords = np.vstack([G.nodes[u]["coords"] for u in G])
-#     geo_w  = np.exp(-gamma * G[src][dst]["dist"])
-
-#     if beta is None:
-#         beta = calc_beta_param(G, q)
-
-#     beliefs = rng.dirichlet(np.ones(q), size=n)
-#     if init_beliefs == "spectral":
-#         spec = spectral_clustering(G, q, seed=seed)
-#         for u, idx in node2idx.items():
-#             beliefs[idx, spec[u]] += 0.2
-#         beliefs /= beliefs.sum(1, keepdims=True)
-
-#     messages_old = initialize_messages(
-#         G, q, method=message_init, beliefs=beliefs,
-#         node_2_idx=node2idx, idx_2_node=idx2node, src=src, dst=dst,
-#         seed=seed, group_obs=group_obs, min_sep=min_sep, eps=eps,
-#     )
-#     messages = np.empty_like(messages_old)
-#     S        = np.empty((n, q), dtype=np.float64)
-#     exp_beta = np.exp(beta)
-
-#     for it in range(max_iter):
-#         #belief update 
-#         edge_fac = 1.0 + (exp_beta - 1.0) * geo_w[:, None] * messages_old
-#         log_fac  = np.log(edge_fac.clip(1e-10))
-#         S.fill(0.0)
-#         np.add.at(S, dst, log_fac)
-#         beliefs[:] = np.exp(S)
-#         beliefs   /= beliefs.sum(1, keepdims=True)
-
-#         # message update
-#         comm_sz = beliefs.mean(0)
-#         theta   = (deg[:, None] * beliefs).sum(0)
-#         msg_new = np.exp(
-#             -beta * deg[src, None] * theta / (2.0 * m)
-#             + S[src] - log_fac[rev]
-#             - balance_regularization * np.log(comm_sz + 1e-10)
-#         )
-#         msg_new /= msg_new.sum(1, keepdims=True)
-#         messages[:] = (1.0 - damping) * msg_new + damping * messages_old
-
-#         delta = np.max(np.abs(messages - messages_old))
-#         if delta < tol:
-#             print(f"[BP] converged in {it+1} iterations (delta={delta:.2e})")
-#             break
-#         messages_old, messages = messages, messages_old   # swap
-
-#     preds = beliefs.argmax(1)
-#     return beliefs, preds, node2idx, idx2node
-
-def weighted_percentile(data, percentile, weights=None):
-    """
-    Compute the weighted percentile of a dataset.
-    
-    Parameters
-    ----------
-    data : array-like
-        The data to compute percentile on.
-    percentile : float
-        The percentile to compute (between 0 and 100).
-    weights : array-like, optional
-        The weights for each data point. If None, uniform weights are used.
-        
-    Returns
-    -------
-    float
-        The weighted percentile value.
-    """
-    if weights is None:
-        return np.percentile(data, percentile)
-        
-    # Convert to numpy arrays if they aren't already
-    data = np.asarray(data)
-    weights = np.asarray(weights)
-    
-    # Sort data and weights together
-    sorted_idx = np.argsort(data)
-    sorted_data = data[sorted_idx]
-    sorted_weights = weights[sorted_idx]
-    
-    # Calculate cumulative weights (normalized)
-    cumulative_weights = np.cumsum(sorted_weights)
-    if cumulative_weights[-1] <= 0:
-        return np.nan
-    cumulative_weights = cumulative_weights / cumulative_weights[-1]
-    
-    # Interpolate to find the percentile
-    return np.interp(percentile/100, cumulative_weights, sorted_data)
-
+from scipy.sparse import diags
+from sklearn.cluster import KMeans
+from scipy.sparse import csgraph
+from scipy.sparse.csgraph import laplacian as cs_lap
+from numpy.linalg import norm
+import scipy.sparse as sp
+from scipy.sparse.linalg import eigs
+from typing import Union, Tuple
+from scipy.sparse.linalg import LinearOperator, eigsh
+from scipy.sparse.csgraph import shortest_path
 
 def create_dist_observed_subgraph(num_coords, observations):
     """
@@ -214,115 +109,478 @@ def _scale_or_prune(
 
 
 # ----------------------------------------------------------------------
-# EM driver
+# EM driver – spectral dual (“duo_spec”)
 # ----------------------------------------------------------------------
-def duo_bp(
-    G_obs          : nx.Graph,
-    K              : int,
-    num_balls      : int = 16,
+
+# ----------------------------------------------------------------------
+# 1)  Bethe–Hessian  (with NB-based r  + better softmax confidence)
+# ----------------------------------------------------------------------
+def _largest_nb_eig(G, nodes, max_iter=200, tol=1e-5, seed=42):
+    """
+    Power-iteration for the leading eigenvalue of the non-backtracking matrix
+    without materialising it explicitly (O(|E|) memory).
+    """
+    rng   = np.random.default_rng(seed)
+    m     = G.number_of_edges()
+    # directed edge list -------------------------------------------------
+    edges = []
+    for u, v in G.edges():
+        edges.append((u, v))
+        edges.append((v, u))
+    e2idx = {e: i for i, e in enumerate(edges)}
+    idx2e = edges
+    n_dir = len(edges)
+
+    # adjacency helper  --------------------------------------------------
+    nbr = [[] for _ in range(n_dir)]
+    for idx, (u, v) in enumerate(idx2e):
+        for w in G.neighbors(v):
+            if w == u:
+                continue            # non-backtracking
+            nbr[idx].append(e2idx[(v, w)])
+
+    # power iteration ----------------------------------------------------
+    x     = rng.standard_normal(n_dir)
+    x    /= norm(x)
+    lam   = 0.0
+    for _ in range(max_iter):
+        x_new = np.zeros_like(x)
+        for i, js in enumerate(nbr):
+            x_new[i] = x[js].sum()
+        lam_new = norm(x_new)
+        x_new  /= lam_new
+        if abs(lam_new - lam) < tol * lam_new:
+            lam = lam_new
+            break
+        x, lam = x_new, lam_new
+    return lam        # leading eigen-value ρ
+
+
+# ---------------------------------------------------------------------------
+# Confidence helper: 1 / (1 + ‖x − μ‖)
+# ---------------------------------------------------------------------------
+def _conf_from_center(X, mu):
+    """
+    Confidence matrix Q[i,c] = 1 / (1 + ||x_i − μ_c||_2)
+    Rows are re-normalised to sum to 1.
+    """
+    dists = np.linalg.norm(X[:, None, :] - mu[None, :, :], axis=-1)  # (n,q)
+    Q     = 1.0 / (1.0 + dists)
+    Q    /= Q.sum(axis=1, keepdims=True)
+    return Q
+
+
+# ---------------------------------------------------------------------------
+# 1) Bethe–Hessian geometry step  (soft confidence)
+# ---------------------------------------------------------------------------
+def bethe_hessian(
+    H_obs           : nx.Graph,
+    q               : int,
     *,
-    # ---------------- algorithmic knobs ----------------
-    max_em_iters         : int   = 50,
-    anneal_steps         : int   = 6,     # how many EM rounds to ramp-up λ
-    warmup_rounds        : int   = 2,     # pure “E” rounds (no pruning)
-    comm_cut             : float = 0.90,  # percentile threshold
-    geo_cut              : float = 0.90,
-    shrink_comm          : float = 1.00,
-    shrink_geo           : float = 0.80,
-    w_min                : float = 5e-2,
-    # ---------------- BP control -----------------------
-    max_iter_bp          : int   = 1_000,
-    damp_high            : float = 0.50,
-    damp_low             : float = 0.25,
-    balance_regularization : float = 0.20,
-    # ---------------- misc -----------------------------
-    tol                  : float = 1e-4,
-    patience             : int   = 7,
-    bp_kwargs            : Dict | None = None,
-    seed                 : int   = 0,
+    use_nonbacktracking : bool = True,
+    weight_from_dist    : bool = True,
+    sigma_scale         : float = 1.0,
+    random_state        : int   = 42,
 ):
     """
-    EM-like alternating refinement with a gentle start and annealed updates.
+    Bethe–Hessian spectral embedding with soft confidence output.
     Returns
     -------
-    dict with keys  beliefs, communities, balls, history, node2idx, idx2node
+    Q      : (n,q) confidence; rows sum to 1
+    hard   : argmax(Q,1)
+    node2idx / idx2node
     """
-    ############ BP default kwargs ################################################
-    bp_kwargs = dict(bp_kwargs or {})
-    bp_kwargs.setdefault("seed", seed)
-    bp_kwargs.setdefault("init", "spectral")
-    bp_kwargs.setdefault("max_iter", max_iter_bp)
-    bp_kwargs.setdefault("balance_regularization", balance_regularization)
+    # ---------- node order ----------------------------------------------------
+    nodes      = list(H_obs.nodes())
+    node2idx   = {u: i for i, u in enumerate(nodes)}
+    idx2node   = {i: u for u, i in node2idx.items()}
+    n          = len(nodes)
 
-    # we change damping inside the loop
-    bp_kwargs.pop("damping", None)
+    # ---------- (optional) weight from 'dist' ---------------------------------
+    if weight_from_dist:
+        d_vals = np.array([d["dist"] for _, _, d in H_obs.edges(data=True)])
+        sigma  = (np.median(d_vals) or 1.0) * sigma_scale
+        for u, v, d in H_obs.edges(data=True):
+            d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
 
-    ############ helpers ##########################################################
+    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
+                                   format="csr", weight="weight")
+    deg = np.array(A.sum(axis=1)).ravel()
+    D   = diags(deg)
+
+    # ---------- choose r ------------------------------------------------------
+    if use_nonbacktracking:
+        # build non‐backtracking operator B of size (2m×2m)
+        # list all directed edges
+        directed_edges = [(u, v) for u, v in H_obs.edges()] + [(v, u) for u, v in H_obs.edges()]
+        m = len(directed_edges)
+        edge_idx = {e: i for i, e in enumerate(directed_edges)}
+
+        rows = []
+        cols = []
+        data = []
+        for (u, v) in directed_edges:
+            for w in H_obs.neighbors(v):
+                if w == u:
+                    continue
+                rows.append(edge_idx[(u, v)])
+                cols.append(edge_idx[(v, w)])
+                data.append(1.0)
+        B = sp.csr_matrix((data, (rows, cols)), shape=(m, m), dtype=np.float64)
+
+        # compute the leading eigenvalue of B
+        rho = np.real(eigs(B, k=1, which='LR', return_eigenvectors=False)[0])
+        r = np.sqrt(rho)
+    r = np.sqrt(deg.mean())
+
+    # ---------- Bethe–Hessian -------------------------------------------------
+    I  = diags(np.ones(n))
+    # Add a small regularization term to improve matrix conditioning
+    eps = 1e-6
+    Hr = (r * r - 1.0) * I - r * A + D + eps * sp.eye(n)
+    
+    # Use more robust eigenvalue computation with fallback options
+    try:
+        # First attempt with shift-invert mode for better numerical stability
+        sigma = 1.0  # shift value
+        vals, vecs = eigsh(-Hr, k=q, which="LM", sigma=sigma, 
+                          tol=1e-5, maxiter=10000, mode='normal')
+    except Exception as e:
+        # Fallback strategy 1: Try with different parameters
+        try:
+            vals, vecs = eigsh(-Hr, k=q, which="LA", 
+                              tol=1e-3, maxiter=5000)
+        except Exception:
+            # Fallback strategy 2: Reduce number of requested eigenvectors
+            try:
+                # Try with fewer eigenvectors
+                k_reduced = max(2, q - 2)
+                vals, vecs = eigsh(-Hr, k=k_reduced, which="LA", 
+                                  tol=1e-3, maxiter=2000)
+                
+                # If we got fewer eigenvectors than requested, pad with zeros
+                if vecs.shape[1] < q:
+                    padding = np.zeros((n, q - vecs.shape[1]))
+                    vecs = np.hstack([vecs, padding])
+            except Exception:
+                # Last resort: use dense eigensolver if sparse methods fail
+                print(f"Warning: Falling back to dense eigensolver for Bethe-Hessian")
+                Hr_dense = Hr.toarray()
+                vals_dense, vecs_dense = np.linalg.eigh(-Hr_dense)
+                
+                # Take largest eigenvalues (which are at the end for -Hr)
+                idx = np.argsort(vals_dense)[-q:]
+                vals = vals_dense[idx]
+                vecs = vecs_dense[:, idx]
+
+    # ---------- k-means & confidence -----------------------------------------
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+    Q     = _conf_from_center(vecs, mu)
+
+    return Q, hard, node2idx, idx2node
+
+
+# ---------------------------------------------------------------------------
+# 2) Normalised-Laplacian community step  (soft confidence)
+# ---------------------------------------------------------------------------
+def laplacian(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (norm-Laplacian) with 1/(1+dist) confidence.
+    """
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+
+    A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    L = csgraph.laplacian(A, normed=True).astype(float)
+
+    evals, evecs = np.linalg.eigh(L.toarray())
+    X = evecs[:, 1 : q + 1]  # bottom q (skip trivial)
+
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+    Q     = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+def regularized_laplacian(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (regularized Laplacian) with 1/(1+dist) confidence.
+    Uses L_reg = (D + τ I)^(-1/2) A (D + τ I)^(-1/2) with τ = 1.
+    """
+    # --- build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # --- adjacency and degrees
+    A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    deg      = np.array(A.sum(axis=1)).flatten()
+
+    # --- regularization
+    tau      = 1.0
+    D_reg    = sp.diags(deg + tau)
+    D_inv_s  = sp.diags(1.0 / np.sqrt(deg + tau))
+
+    # --- regularized Laplacian operator
+    L_reg    = D_inv_s @ A @ D_inv_s
+
+    # --- eigen-decomposition (dense for simplicity)
+    evals, evecs = np.linalg.eigh(L_reg.toarray())
+    # take top-q eigenvectors (largest eigenvalues)
+    X = evecs[:, -q:]
+
+    # --- k-means clustering
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+
+    # --- soft confidence from distance to centers
+    Q    = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+
+def morans(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (Moran's I operator) with 1/(1+dist) confidence.
+    Uses M = D^(-1/2) A D^(-1/2) - (1 1^T) / vol, where vol = sum_i d_i.
+    """
+    # --- build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # --- adjacency and degrees
+    A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    deg      = np.array(A.sum(axis=1)).flatten()
+    vol      = deg.sum()
+
+    # --- add regularization to avoid division by zero
+    tau      = 1e-8  # small regularization constant
+    deg_reg  = deg + tau
+    vol_reg  = deg_reg.sum()
+
+    # --- normalized adjacency with regularization
+    D_inv_s = sp.diags(1.0/np.sqrt(deg_reg))
+    P       = D_inv_s @ A @ D_inv_s  # still sparse
+
+    n = len(deg)
+    
+    # --- direct sparse matrix approach for better stability
+    # Create the constant term (1/vol) * (1 1^T) as a sparse matrix
+    ones_vec = np.ones(n) / np.sqrt(vol_reg)
+    J = sp.csr_matrix(np.outer(ones_vec, ones_vec))
+    M = P - J
+
+    # --- eigen-decomposition (using sparse eigensolvers with better parameters)
+    # Using shift-invert mode for better numerical stability
+    sigma = 0.5  # shift value near the eigenvalues we want
+    try:
+        # First attempt with shift-invert mode
+        evals, evecs = eigsh(M, k=q, which='LM', tol=1e-5, maxiter=10000,
+                             sigma=sigma, mode='normal')
+    except Exception:
+        # Fallback approach with simpler parameters if first attempt fails
+        try:
+            evals, evecs = eigsh(M, k=q, which='LM', tol=1e-3, maxiter=5000)
+        except Exception:
+            # Last resort: use dense eigensolver if sparse methods fail
+            M_dense = M.toarray()
+            evals, evecs = np.linalg.eigh(M_dense)
+            # Take largest eigenvalues
+            idx = np.argsort(evals)[-q:]
+            evals = evals[idx]
+            evecs = evecs[:, idx]
+    
+    # Sort by eigenvalue (if using sparse method)
+    if len(evals) == q:  # Only sort if we got exactly q eigenvalues
+        idx = np.argsort(evals)
+        evals = evals[idx]
+        evecs = evecs[:, idx]
+    
+    # take top-q eigenvectors (largest eigenvalues)
+    X = evecs[:, -q:]
+
+    # --- k-means clustering
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+
+    # --- soft confidence from distance to centers
+    Q    = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+
+# ---------------------------------------------------------------------------
+# 4) SCORE community step  (soft confidence)
+# ---------------------------------------------------------------------------
+def score(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    SCORE: Spectral Clustering On Ratios‐of‐Eigenvectors.
+    1) Regularize adjacency A -> (D+τI)^(-1/2) A (D+τI)^(-1/2)
+    2) Compute top‐q eigenvectors v1…vq
+    3) Build ratio matrix R[i,ℓ] = v_{ℓ+1}[i]/(v1[i] + eps)
+    4) k-means on R, then soft confidence via 1/(1+dist)
+    """
+    # — build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # — adjacency + regularization
+    A    = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format='csr')
+    deg  = np.array(A.sum(axis=1)).ravel()
+    τ    = 1.0
+    D_s  = diags(1.0 / np.sqrt(deg + τ))
+    A_reg = D_s @ A @ D_s
+
+    # — leading q eigenvectors of A_reg
+    vals, vecs = eigsh(A_reg, k=q, which='LA', tol=1e-5)
+    v1 = vecs[:, 0]
+    eps = 1e-8
+
+    # — build ratio matrix R ∈ ℝ^{n×(q-1)}
+    R = np.zeros((n, q-1))
+    for ℓ in range(1, q):
+        R[:, ℓ-1] = vecs[:, ℓ] / (v1 + eps)
+
+    # — k-means + soft confidence
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(R)
+    hard = km.labels_
+    Q    = _conf_from_center(R, km.cluster_centers_)
+    return Q, hard, node2idx, idx2node
+
+
+# ---------------------------------------------------------------------------
+# Update get_callable to include the new methods
+# ---------------------------------------------------------------------------
+def get_callable(calls: Union[Tuple, str]):
+    func_dict = {
+        "bethe_hessian":     bethe_hessian,
+        "laplacian":         laplacian,
+        "regularized_laplacian": regularized_laplacian,
+        "morans":            morans,
+        "isomap":            isomap,
+        "score":             score,
+    }
+    if isinstance(calls, str):
+        return (func_dict[calls], func_dict[calls])
+    elif isinstance(calls, tuple):
+        if len(calls) == 2:
+            return (func_dict[calls[0]], func_dict[calls[1]])
+        elif len(calls) == 1:
+            return (func_dict[calls[0]], func_dict[calls[0]])
+        else:
+            raise ValueError("Invalid callable input")
+# ---------------------------------------------------------------------------
+# EM driver  – spectral dual
+# ---------------------------------------------------------------------------
+def duo_spec(
+    H_obs            : nx.Graph,
+    K                : int,
+    num_balls        : int = 16,
+    config           : tuple = (bethe_hessian, bethe_hessian),
+    max_em_iters     : int   = 50,
+    anneal_steps     : int   = 6,
+    warmup_rounds    : int   = 2,
+    comm_cut         : float = 0.90,
+    geo_cut          : float = 0.90,
+    shrink_comm      : float = 1.00,
+    shrink_geo       : float = 0.80,
+    w_min            : float = 5e-2,
+    tol              : float = 1e-4,
+    patience         : int   = 7,
+    random_state     : int   = 0,
+):
+    """
+    Alternating EM-like refinement driven by the new confidence definition.
+    """
+    rng             = np.random.default_rng(random_state)
+    subG            = deepcopy(H_obs)
+    edges           = np.asarray(subG.edges(), dtype=object)
+    node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
+    iu_global, iv_global = _to_idx(edges, node2idx_global)
+
+    best, hist = {"obj": -np.inf}, []
+    no_imp     = 0
+    config = get_callable(config)
     def _current_lambda(step, base, ramp):
-        """Linear ramp-up   0 → base   over 'ramp' steps."""
-        if step <= ramp:
-            return base * step / ramp
-        return base
+        if step <= 0:
+            return 0.0
+        if step >= ramp:
+            return base
+        return base * step / ramp
 
-    ############ main loop ########################################################
-    best   = {"obj": -np.inf}
-    hist   : list[dict] = []
-    subG   = deepcopy(G_obs)
-    no_imp = 0
-
+    # --------------------------- EM loop -------------------------------------
     for em in range(1, max_em_iters + 1):
-        # ------------------------------------------------ adaptive BP damping ---
-        frac = min(1., em / max_em_iters)
-        bp_kwargs["damping"] = damp_high - frac * (damp_high - damp_low)
 
-        # -------------------- Community belief propagation ----------------------
-        bel_c, _, n2i_c, _ = belief_propagation(
-            subG, q=K, **bp_kwargs
+        # ------------------------ community step ------------------------------
+        Q_comm, hard_comm, *_ = config[0](
+            subG, q=K, random_state=random_state
         )
-        edges      = np.asarray(subG.edges(), dtype=object)
-        iu_c, iv_c = _to_idx(edges, n2i_c)
-        p_same     = _edge_same_prob(bel_c, iu_c, iv_c)
+        p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
+        mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
 
-        # percentile mask (more conservative)
-        thresh_comm = np.percentile(p_same, comm_cut * 100)
-        mask_comm   = p_same > thresh_comm
-
-        # -------------------- Geometry (“balls”) --------------------------------
-        bel_g, _, n2i_g, _ = belief_propagation(
-            subG, q=num_balls, **bp_kwargs
+        # ------------------------ geometry step -------------------------------
+        Q_geo, hard_geo, *_ = config[1](
+            subG, q=num_balls, random_state=random_state
         )
-        lbls_g  = bel_g.argmax(1)
-        iu_g, iv_g = _to_idx(edges, n2i_g)
-        same_ball  = lbls_g[iu_g] == lbls_g[iv_g]
-
-        thresh_geo = np.percentile(
-            0.5 * (bel_g[iu_g, lbls_g[iu_g]] + bel_g[iv_g, lbls_g[iv_g]]),
-            geo_cut * 100,
-        )
+        same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
+        conf_g     = 0.5 * (Q_geo[iu_global, hard_geo[iu_global]] +
+                            Q_geo[iv_global, hard_geo[iv_global]])
         mask_geo = same_ball & (
-            0.5 * (bel_g[iu_g, lbls_g[iu_g]] + bel_g[iv_g, lbls_g[iv_g]]) > thresh_geo
+            conf_g > np.percentile(conf_g, geo_cut * 100)
         )
 
-        # ------------ shrink / prune      (skip in warm-up rounds) --------------
+        # ------------------------ shrink / prune ------------------------------
         λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
         λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
 
         n_drop_comm = n_drop_geo = 0
         if em > warmup_rounds:
             n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
-            n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo), λ_geo , w_min)
+            n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo),
+                                          λ_geo , w_min)
 
-        # ---------------------- objective & bookkeeping -------------------------
-        obj = float(np.max(bel_c, axis=1).sum())
+        # ------------------------ objective & logging -------------------------
+        obj = float(np.max(Q_comm, axis=1).sum())   # higher is better
         hist.append(dict(
             iter=em, obj=obj, edges=subG.number_of_edges(),
             drop_comm=n_drop_comm, drop_geo=n_drop_geo,
-            damping=bp_kwargs["damping"], λ_comm=λ_comm, λ_geo=λ_geo
+            λ_comm=λ_comm, λ_geo=λ_geo,
         ))
 
-        # -------------------- early stopping / best save ------------------------
         if obj > best["obj"]:
-            best.update(obj=obj, beliefs=bel_c, balls=lbls_g, node2idx=n2i_c)
+            best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
+                        node2idx=node2idx_global)
             no_imp = 0
         else:
             no_imp += 1
@@ -330,23 +588,21 @@ def duo_bp(
         if no_imp >= patience:
             print(f"[EM] patience reached ({patience}) at iter {em}")
             break
-
         if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
             print(f"[EM] converged at iter {em}")
             break
-
         if subG.number_of_edges() == 0:
             print("[EM] graph emptied – stop")
             break
 
-    hard = best["beliefs"].argmax(1)
+    hard_final = best["beliefs"].argmax(1)
     return dict(
-        beliefs=best["beliefs"],
-        communities=hard,
-        balls=best["balls"],
-        node2idx=best["node2idx"],
-        idx2node={i: u for u, i in best["node2idx"].items()},
-        history=hist,
+        beliefs     = best["beliefs"],
+        communities = hard_final,
+        balls       = best["balls"],
+        node2idx    = best["node2idx"],
+        idx2node    = {i: u for u, i in best["node2idx"].items()},
+        history     = hist,
     )
 
 
@@ -390,9 +646,9 @@ if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 240
-    b = 50
-    n = 40000
+    a = 225
+    b = 75
+    n = 950
     K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
@@ -404,7 +660,7 @@ if __name__ == "__main__":
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = original_density
+    C = 0.005 * original_density
     # print("C:", C)
     # def weight_func(c1, c2):
     #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
@@ -466,7 +722,7 @@ if __name__ == "__main__":
     #     K=K,
     #     num_balls=32,
     # )
-    res = duo_bp(
+    res = duo_spec(
         G_true,
         K=K,
         num_balls=32
