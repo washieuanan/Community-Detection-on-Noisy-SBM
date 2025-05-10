@@ -31,8 +31,8 @@ def generate_gbm(n: int,
     if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
         raise ValueError("Pick a and b s.t. sqrt(a) - sqrt(b) > 2 * sqrt(2)")
 
-    r_in = a * np.log(n) / n
-    r_out = b * np.log(n) / n
+    r_in = np.sqrt(a * np.log(n) / n)
+    r_out = np.sqrt(b * np.log(n) / n)
     p_in = a * np.log(n) / n
     p_out = b * np.log(n) / n
 
