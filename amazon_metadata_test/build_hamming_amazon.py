@@ -128,78 +128,57 @@ def _build_lsh(categories, num_perm=128, threshold=0.5):
         lsh.insert(idx, m)
     return lsh
 
-
-def embed_products(products,
-                   method='svd',
-                   subsampled_classes=['Book', 'DVD', 'Music', 'Video'],
-                   embedding_dim=2,
-                   random_state=None,
-                   use_dask=False,
-                   **kwargs):
+def build_category_graph(products,
+                         subsampled_classes=['Book', 'DVD', 'Music', 'Video']):
     """
-    Build G and compute embeddings via one of:
-      - 'svd'            : Truncated SVD on attribute matrix
-      - 'umap'           : UMAP with Jaccard metric
-      - 'landmark_mds'   : Landmark MDS (needs lmds)
-      - 'node2vec'       : Node2Vec on the graph (needs nodevectors)
-      - 'minhash_lsh'    : MinHash + LSH index (returns LSH object)
+    Build G where each node has:
+      - 'asin', optional 'comm' (from your _preprocess)
+      - 'cat_vec': binary numpy array of length n_categories,
+        indicating which categories it belongs to.
 
-    Returns:
-      - G with node attribute 'coords' (and 'asin', 'comm') set to the embedding
-      - lsh index if method == 'minhash_lsh'
+    Each edge (u,v) gets attribute:
+      - 'dist': normalized Hamming distance between cat_vec[u] and cat_vec[v],
+        scaled so that the maximum observed Hamming distance is 1.
     """
+    # 1) Build G, node_ids and sparse X via your original _preprocess
     G, node_ids, X = _preprocess(products, subsampled_classes)
 
-    if method == 'svd':
-        Y = _embed_svd(X, embedding_dim, random_state, use_dask)
-    elif method == 'umap':
-        Y = _embed_umap(X, embedding_dim, random_state)
-    elif method == 'landmark_mds':
-        Y = _embed_landmark_mds(X,
-                                embedding_dim,
-                                n_landmarks=kwargs.get('n_landmarks', 1000),
-                                random_state=random_state)
-    elif method == 'node2vec':
-        Y = _embed_node2vec(G,
-                            embedding_dim,
-                            walklen=kwargs.get('walklen', 10),
-                            epochs=kwargs.get('epochs', 1))
-    elif method == 'minhash_lsh':
-        categories = [products[asin].get('categories', []) for asin in products]
-        lsh = _build_lsh(categories,
-                         num_perm=kwargs.get('num_perm', 128),
-                         threshold=kwargs.get('threshold', 0.5))
-        return G, lsh
-    else:
-        raise ValueError(f"Unknown embedding method: {method!r}")
+    # 2) Assign binary category vectors to nodes
+    #    X is n_nodes × n_categories in CSR; X[i].A1 is a dense 1D array
+    for idx in node_ids:
+        G.nodes[idx]['coords'] = X[idx].toarray().flatten().astype(int)
 
-    # assign embeddings back to graph nodes by numeric ID
-    for idx, coord in zip(node_ids, Y):
-        G.nodes[idx]['coords'] = coord
+    # 3) Compute raw Hamming distances for each edge
+    raw = {}
+    for u, v in G.edges():
+        vec_u = G.nodes[u]['coords']
+        vec_v = G.nodes[v]['coords']
+        # Hamming = count of differing bits
+        raw[(u, v)] = np.count_nonzero(vec_u != vec_v)
+
+    # 4) Normalize so max(raw) → 1
+    max_raw = max(raw.values()) if raw else 1
+    for (u, v), d in raw.items():
+        G.edges[u, v]['dist'] = d / max_raw
+
     return G
 
-import json
-import networkx as nx
-products = json.load(open('amazon_metadata_test/parsed_amazon_meta.json'))
-# products: your dict of ASIN → {'group':…, 'similar':[…], 'categories':[…]}
-G_embedded = embed_products(
-    products,
-    method='svd',              # or 'umap', 'landmark_mds', 'node2vec', 'minhash_lsh'
-    subsampled_classes=['DVD', 'Video'],
-    embedding_dim=16,
-    random_state=42,
-    use_dask=True,             # only if Dask-ML is installed and you want parallel SVD
-    n_landmarks=2000,          # for landmark_mds
-    walklen=20, epochs=2,      # for node2vec
-    num_perm=256, threshold=0.6  # for minhash_lsh
-)
-print("Number of nodes:", G_embedded.number_of_nodes())
-print("Node names:", list(G_embedded.nodes())[:5])
-# Convert numpy array coordinates to strings
-for node in G_embedded.nodes():
-    if 'coords' in G_embedded.nodes[node]:
-        coords = G_embedded.nodes[node]['coords']
-        G_embedded.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_cosine_videoDVD.gml')
-# Now each node G_embedded.nodes[asin]['coords'] is a length-16 unit vector.
+if __name__ == "__main__":
+    import json
+    import os
+    # Example usage
+    # products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
+    # G = build_category_graph(products, subsampled_classes=['DVD','Video'])
+    # for node in G.nodes():
+    #     if 'coords' in G.nodes[node]:
+    #         coords = G.nodes[node]['coords']
+    #         G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+
+    # nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_videoDVD.gml')
+    # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
+    # print(G.nodes['0'])
+    # node_info = G.nodes['0']['coords']
+    # node_info = np.fromstring(node_info, sep=",")
+    # print(node_info)
+    # print(sum(node_info))

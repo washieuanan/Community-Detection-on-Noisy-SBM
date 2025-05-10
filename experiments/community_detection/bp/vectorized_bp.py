@@ -217,34 +217,40 @@ def belief_propagation(
         # --------------------------------------------------------------
         #  Belief update  (matches reference inner loops)
         # --------------------------------------------------------------
-        edge_fac = 1.0 + (exp_beta - 1.0) * messages_old
-        log_fac = np.log(edge_fac.clip(1e-10))
+        edge_fac = 1.0 + (exp_beta - 1.0) * messages_old.clip(1e-10)
+        log_fac = np.log(edge_fac)
         S.fill(0.0)
         np.add.at(S, dst, log_fac)
-        beliefs[:] = np.exp(S - S.max(1)[:, None])
-        beliefs /= beliefs.sum(1)[:, None]
+        # Compute beliefs in log space then exp
+        log_beliefs = S - S.max(1)[:, None]
+        beliefs[:] = np.exp(log_beliefs - np.log(np.exp(log_beliefs).sum(1)[:, None] + 1e-10))
 
         # --------------------------------------------------------------
         #  Community sizes & theta (same formulas)
         # --------------------------------------------------------------
-        comm_sz = beliefs.mean(0)                          # community_sizes
-        theta = (deg[:, None] * beliefs).sum(0)            # theta
+        comm_sz = beliefs.mean(0).clip(1e-10)              # community_sizes with clipping
+        theta = (deg[:, None] * beliefs).sum(0).clip(1e-10)  # theta with clipping
 
         # --------------------------------------------------------------
         #  Message update  (vectorised reference equation)
         # --------------------------------------------------------------
         # Safe handling of zero edge case
         if m > 0:
-            messages_new = np.exp(
+            # Compute messages in log space for numerical stability
+            log_messages = (
                 -beta * deg[src, None] * theta / (2.0 * m) +   # term1
                 S[src] -                                       # Σ over neighbours except dst
                 log_fac[rev] -                                 # subtract k→i contribution
-                balance_regularization * np.log(comm_sz + 1e-10)  # size_penalty
+                balance_regularization * np.log(comm_sz)       # size_penalty
             )
+            # Subtract max for numerical stability
+            log_max = log_messages.max(1)[:, None]
+            messages_new = np.exp(log_messages - log_max)
+            messages_new /= messages_new.sum(1)[:, None].clip(1e-10)
         else:
             # If m=0, provide a fallback to prevent division by zero
             messages_new = np.ones_like(messages_old)
-        messages_new /= messages_new.sum(1)[:, None]
+            messages_new /= messages_new.sum(1)[:, None].clip(1e-10)
 
         # Damp
         messages[:] = (1.0 - damping) * messages_new + damping * messages_old
@@ -260,6 +266,11 @@ def belief_propagation(
         # Protected maximum calculation
         try:
             delta = np.max(np.abs(messages - messages_old))
+            if np.isnan(delta):
+                print("[BP] Warning: NaN values detected, reducing learning rate")
+                damping = min(damping * 1.5, 0.9)  # Increase damping
+                messages[:] = messages_old  # Revert to previous state
+                continue
         except ValueError as e:
             if "zero-size array" in str(e):
                 print("[BP] Warning: Zero-size array in delta calculation, aborting loop")
