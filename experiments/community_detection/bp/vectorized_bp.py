@@ -2,11 +2,14 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Literal
 import networkx as nx
 import numpy as np
-import scipy.sparse.linalg as sla
+
 from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
+
+from scipy.sparse.linalg import eigsh
+
 
 # -----------------------------------------------------------------------------
 #  Graph → contiguous numpy arrays
@@ -36,8 +39,11 @@ def build_arrays(G: nx.Graph):
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
     # Make sure the adjacency matrix uses a valid dtype for eigs
     adj_mat = nx.adjacency_matrix(G).astype(np.float64)
-    ncv = min(adj_mat.shape[0] - 1, max(2*q + 1, q + 20))
-    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-2, ncv=ncv, maxiter=1000)
+    
+    N = adj_mat.shape[0]
+    ncv = min(N - 1, max(q + 20, 5*q))
+
+    vals, vecs = eigsh(adj_mat, k=q, which="LA", tol=1e-2, ncv=ncv, maxiter=1000)
     km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
     return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
 

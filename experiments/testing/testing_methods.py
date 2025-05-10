@@ -146,15 +146,15 @@ def process_file(input_path, output_dir):
 
 
 def main():
-    input_dir = 'datasets/fixed_gbm_w_observations'
-    output_dir = 'results/all_methods/'
+    input_dir = 'datasets/GBM_W_OBS_DENSITY/'
+    output_dir = 'results/all_methods_corrected/'
     os.makedirs(output_dir, exist_ok=True)
 
     json_files = sorted(glob.glob(os.path.join(input_dir, '*.json')))
     print(f"Found {len(json_files)} files in {input_dir}")
 
     # start after json 112
-    json_files = json_files[16:]
+    # json_files = json_files[27:]
     for path in json_files:
         process_file(path, output_dir)
 
