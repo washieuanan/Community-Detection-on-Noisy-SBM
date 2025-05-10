@@ -390,33 +390,37 @@ if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 100
+    a = 240
     b = 50
-    n = 700
+    n = 40000
     K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     G_true = generate_gbm(n=n, K=K, a=a, b=b, seed=42)
+    print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
+    for u, v in G_true.edges():
+        G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
+    print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.015 * original_density
+    C = original_density
+    # print("C:", C)
+    # def weight_func(c1, c2):
+    #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+    #     return 1.0
 
-    def weight_func(c1, c2):
-        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-        return 1.0
+    # num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    # sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    # observations = sampler.observe()
 
-    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    observations = sampler.observe()
+    # obs_nodes: Set[int] = set()
+    # for p, d in observations:
+    #     obs_nodes.add(p[0])
+    #     obs_nodes.add(p[1])
 
-    obs_nodes: Set[int] = set()
-    for u, v in observations:
-        obs_nodes.add(u)
-        obs_nodes.add(v)
-
-    subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
-    print("Running Loopy BP …")
+    # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
+    # print("Running Loopy BP …")
     # beliefs, preds, node2idx, idx2node = belief_propagation(
     #     subG,
     #     q=K,
@@ -457,14 +461,25 @@ if __name__ == "__main__":
     #     # adaptive_min_edges=True,        # Adaptively decrease min_edges
     #     # early_stopping_window=5,        # Stop if no improvement for 5 iterations
     # )
+    # res = duo_bp(
+    #     subG,
+    #     K=K,
+    #     num_balls=32,
+    # )
     res = duo_bp(
-        subG,
+        G_true,
         K=K,
-        num_balls=32,
+        num_balls=32
     )
     preds = res["communities"]
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)
+    # sub_preds = np.array([preds[i] for i in obs_nodes])
+    # sub_true_labels = np.array([true_labels[i] for i in obs_nodes])
+    # sub_stats = detection_stats(sub_preds, sub_true_labels)
     print("\n=== Community‑detection accuracy ===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")
+    # print("\n=== Subgraph community‑detection accuracy ===")
+    # for k, v in sub_stats.items():
+    #     print(f"{k:>25s} : {v}")
