@@ -148,19 +148,28 @@ def build_category_graph(products,
     for idx in node_ids:
         G.nodes[idx]['coords'] = X[idx].toarray().flatten().astype(int)
 
+    # # 3) Compute raw Hamming distances for each edge
+    # raw = {}
+    # for u, v in G.edges():
+    #     vec_u = G.nodes[u]['coords']
+    #     vec_v = G.nodes[v]['coords']
+    #     # Hamming = count of differing bits
+    #     raw[(u, v)] = np.count_nonzero(vec_u != vec_v)
+
+    # # 4) Normalize so max(raw) → 1
+    # max_raw = max(raw.values()) if raw else 1
+    # for (u, v), d in raw.items():
+    #     G.edges[u, v]['dist'] = d / max_raw
     # 3) Compute raw Hamming distances for each edge
-    raw = {}
     for u, v in G.edges():
         vec_u = G.nodes[u]['coords']
         vec_v = G.nodes[v]['coords']
-        # Hamming = count of differing bits
-        raw[(u, v)] = np.count_nonzero(vec_u != vec_v)
-
-    # 4) Normalize so max(raw) → 1
-    max_raw = max(raw.values()) if raw else 1
-    for (u, v), d in raw.items():
-        G.edges[u, v]['dist'] = d / max_raw
-
+        # Compute number of common categories (both vectors have 1)
+        common = np.sum(np.logical_and(vec_u, vec_v))
+        if common > 0:
+            G.edges[u, v]['dist'] = 1.0 / common
+        else:
+            G.edges[u, v]['dist'] = 2.0
     return G
 
 
@@ -168,17 +177,16 @@ if __name__ == "__main__":
     import json
     import os
     # Example usage
-    # products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
-    # G = build_category_graph(products, subsampled_classes=['DVD','Video'])
-    # for node in G.nodes():
-    #     if 'coords' in G.nodes[node]:
-    #         coords = G.nodes[node]['coords']
-    #         G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+    products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
+    G = build_category_graph(products, subsampled_classes=['DVD','Video'])
+    for node in G.nodes():
+        if 'coords' in G.nodes[node]:
+            coords = G.nodes[node]['coords']
+            G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-    # nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_videoDVD.gml')
+    nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_inv_videoDVD.gml')
     # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
-    # print(G.nodes['0'])
+    
     # node_info = G.nodes['0']['coords']
-    # node_info = np.fromstring(node_info, sep=",")
-    # print(node_info)
+    # node_info = np.fromstring(node_info[1:-1], sep=",")
     # print(sum(node_info))

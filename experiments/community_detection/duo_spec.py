@@ -177,7 +177,7 @@ def bethe_hessian(
     H_obs           : nx.Graph,
     q               : int,
     *,
-    use_nonbacktracking : bool = True,
+    use_nonbacktracking : bool = False,
     weight_from_dist    : bool = True,
     sigma_scale         : float = 1.0,
     random_state        : int   = 42,
@@ -210,68 +210,14 @@ def bethe_hessian(
 
     # ---------- choose r ------------------------------------------------------
     if use_nonbacktracking:
-        # build non‐backtracking operator B of size (2m×2m)
-        # list all directed edges
-        directed_edges = [(u, v) for u, v in H_obs.edges()] + [(v, u) for u, v in H_obs.edges()]
-        m = len(directed_edges)
-        edge_idx = {e: i for i, e in enumerate(directed_edges)}
-
-        rows = []
-        cols = []
-        data = []
-        for (u, v) in directed_edges:
-            for w in H_obs.neighbors(v):
-                if w == u:
-                    continue
-                rows.append(edge_idx[(u, v)])
-                cols.append(edge_idx[(v, w)])
-                data.append(1.0)
-        B = sp.csr_matrix((data, (rows, cols)), shape=(m, m), dtype=np.float64)
-
-        # compute the leading eigenvalue of B
-        rho = np.real(eigs(B, k=1, which='LR', return_eigenvectors=False)[0])
-        r = np.sqrt(rho)
+        raise NotImplementedError("non-backtracking r not yet hooked in")
     r = np.sqrt(deg.mean())
 
     # ---------- Bethe–Hessian -------------------------------------------------
     I  = diags(np.ones(n))
-    # Add a small regularization term to improve matrix conditioning
-    eps = 1e-6
-    Hr = (r * r - 1.0) * I - r * A + D + eps * sp.eye(n)
-    
-    # Use more robust eigenvalue computation with fallback options
-    try:
-        # First attempt with shift-invert mode for better numerical stability
-        sigma = 1.0  # shift value
-        vals, vecs = eigsh(-Hr, k=q, which="LM", sigma=sigma, 
-                          tol=1e-5, maxiter=10000, mode='normal')
-    except Exception as e:
-        # Fallback strategy 1: Try with different parameters
-        try:
-            vals, vecs = eigsh(-Hr, k=q, which="LA", 
-                              tol=1e-3, maxiter=5000)
-        except Exception:
-            # Fallback strategy 2: Reduce number of requested eigenvectors
-            try:
-                # Try with fewer eigenvectors
-                k_reduced = max(2, q - 2)
-                vals, vecs = eigsh(-Hr, k=k_reduced, which="LA", 
-                                  tol=1e-3, maxiter=2000)
-                
-                # If we got fewer eigenvectors than requested, pad with zeros
-                if vecs.shape[1] < q:
-                    padding = np.zeros((n, q - vecs.shape[1]))
-                    vecs = np.hstack([vecs, padding])
-            except Exception:
-                # Last resort: use dense eigensolver if sparse methods fail
-                print(f"Warning: Falling back to dense eigensolver for Bethe-Hessian")
-                Hr_dense = Hr.toarray()
-                vals_dense, vecs_dense = np.linalg.eigh(-Hr_dense)
-                
-                # Take largest eigenvalues (which are at the end for -Hr)
-                idx = np.argsort(vals_dense)[-q:]
-                vals = vals_dense[idx]
-                vecs = vecs_dense[:, idx]
+    Hr = (r * r - 1.0) * I - r * A + D
+
+    vals, vecs = eigsh(-Hr, k=q, which="LA")   # (n,q)
 
     # ---------- k-means & confidence -----------------------------------------
     km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
@@ -488,7 +434,6 @@ def get_callable(calls: Union[Tuple, str]):
         "laplacian":         laplacian,
         "regularized_laplacian": regularized_laplacian,
         "morans":            morans,
-        "isomap":            isomap,
         "score":             score,
     }
     if isinstance(calls, str):
@@ -507,7 +452,7 @@ def duo_spec(
     H_obs            : nx.Graph,
     K                : int,
     num_balls        : int = 16,
-    config           : tuple = (bethe_hessian, bethe_hessian),
+    config           : tuple = ('bethe_hessian', 'bethe_hessian'),
     max_em_iters     : int   = 50,
     anneal_steps     : int   = 6,
     warmup_rounds    : int   = 2,
