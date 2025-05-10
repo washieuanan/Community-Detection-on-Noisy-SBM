@@ -14,7 +14,7 @@ from experiments.community_detection.bp.duo_bp import (
 # from experiments.community_detection.bp.bethe_duo_bp import (
 #     duo_bp
 # )
-
+from experiments.community_detection.duo_spec import duo_spec
 import os
 import json
 import logging
@@ -44,10 +44,10 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.INFO)
     # logging.getLogger().addHandler(handler)
     
-    G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
+    G = nx.read_gml("amazon_metadata_test/amazon_categories_cosine.gml")
     G = coords_str2arr(G)
     # Subsample G to 25% of its nodes
-    num_nodes = int(0.25 * G.number_of_nodes())
+    num_nodes = int(0.10 * G.number_of_nodes())
     random.seed(42)
     selected_nodes = random.sample(list(G.nodes()), num_nodes)
     G = G.subgraph(selected_nodes).copy()
@@ -66,38 +66,28 @@ if __name__ == "__main__":
     
     results_folder = "amazon_metadata_test/"
     # add distances to G - use more sophisticated distance scaling approach
-    max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
-    for u, v in G.edges():
-        dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
-        # Use modified sigmoid with better scaling
-        scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
-        G.edges[u, v]["dist"] = scaled_dist
-        G.edges[v, u]["dist"] = scaled_dist
+    # max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
+    # for u, v in G.edges():
+    #     dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
+    #     # Use modified sigmoid with better scaling
+    #     scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
+    #     G.edges[u, v]["dist"] = scaled_dist
+    #     G.edges[v, u]["dist"] = scaled_dist
     print("Added distances to edges")
     
-    res = duo_bp(
+    res = duo_spec(
         G,
         K=2,
-        num_balls=int(min(512, G.number_of_nodes() // 20)),  # More balls
-        damp_high=0.85,           # Slightly lower initial damping
-        damp_low=0.35,           # Lower final damping
-        balance_regularization=0.35,  # Stronger regularization
-        w_min=5e-3,              # Lower minimum weight
-        max_em_iters=60,         # More iterations
-        warmup_rounds=4,         # More warmup rounds
-        anneal_steps=15,         # More annealing steps
-        shrink_comm=0.7,         # Stronger community shrinkage
-        shrink_geo=0.6,          # Stronger geometric shrinkage
-        comm_cut=0.93,           # Higher threshold
-        geo_cut=0.92,           # Higher threshold
-        patience=15,             # More patience
-        bp_kwargs={
-            "tol": 5e-5,         # Tighter tolerance
-            "max_iter": 2500,    # More iterations
-            "min_steps": 200,    # More minimum steps
-            "eps": 0.25,         # Stronger initialization bias
-        }
-        )
+        num_balls=32,
+        config = ('score', 'isomap'),
+        warmup_rounds=10
+    )
+    # res = duo_bp(
+    #     G, 
+    #     K=2, 
+    #     num_balls=64,
+    # )
+    
     
     preds = res["communities"]
     print(f"Finished bethe_duo_bp with {len(preds)} predictions")

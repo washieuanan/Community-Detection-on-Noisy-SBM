@@ -201,5 +201,5 @@ for node in G_embedded.nodes():
         coords = G_embedded.nodes[node]['coords']
         G_embedded.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_graph_videoDVD.gml')
+nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_cosine_videoDVD.gml')
 # Now each node G_embedded.nodes[asin]['coords'] is a length-16 unit vector.

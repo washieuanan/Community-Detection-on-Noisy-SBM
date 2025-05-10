@@ -13,11 +13,15 @@ from collections import defaultdict
 from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 from scipy.sparse import diags
-from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
 from scipy.sparse import csgraph
 from scipy.sparse.csgraph import laplacian as cs_lap
 from numpy.linalg import norm
+import scipy.sparse as sp
+from scipy.sparse.linalg import eigs
+from typing import Union, Tuple
+from scipy.sparse.linalg import LinearOperator, eigsh
+from scipy.sparse.csgraph import shortest_path
 
 def create_dist_observed_subgraph(num_coords, observations):
     """
@@ -173,7 +177,7 @@ def bethe_hessian(
     H_obs           : nx.Graph,
     q               : int,
     *,
-    use_nonbacktracking : bool = False,
+    use_nonbacktracking : bool = True,
     weight_from_dist    : bool = True,
     sigma_scale         : float = 1.0,
     random_state        : int   = 42,
@@ -206,14 +210,68 @@ def bethe_hessian(
 
     # ---------- choose r ------------------------------------------------------
     if use_nonbacktracking:
-        raise NotImplementedError("non-backtracking r not yet hooked in")
+        # build non‐backtracking operator B of size (2m×2m)
+        # list all directed edges
+        directed_edges = [(u, v) for u, v in H_obs.edges()] + [(v, u) for u, v in H_obs.edges()]
+        m = len(directed_edges)
+        edge_idx = {e: i for i, e in enumerate(directed_edges)}
+
+        rows = []
+        cols = []
+        data = []
+        for (u, v) in directed_edges:
+            for w in H_obs.neighbors(v):
+                if w == u:
+                    continue
+                rows.append(edge_idx[(u, v)])
+                cols.append(edge_idx[(v, w)])
+                data.append(1.0)
+        B = sp.csr_matrix((data, (rows, cols)), shape=(m, m), dtype=np.float64)
+
+        # compute the leading eigenvalue of B
+        rho = np.real(eigs(B, k=1, which='LR', return_eigenvectors=False)[0])
+        r = np.sqrt(rho)
     r = np.sqrt(deg.mean())
 
     # ---------- Bethe–Hessian -------------------------------------------------
     I  = diags(np.ones(n))
-    Hr = (r * r - 1.0) * I - r * A + D
-
-    vals, vecs = eigsh(-Hr, k=q, which="LA")   # (n,q)
+    # Add a small regularization term to improve matrix conditioning
+    eps = 1e-6
+    Hr = (r * r - 1.0) * I - r * A + D + eps * sp.eye(n)
+    
+    # Use more robust eigenvalue computation with fallback options
+    try:
+        # First attempt with shift-invert mode for better numerical stability
+        sigma = 1.0  # shift value
+        vals, vecs = eigsh(-Hr, k=q, which="LM", sigma=sigma, 
+                          tol=1e-5, maxiter=10000, mode='normal')
+    except Exception as e:
+        # Fallback strategy 1: Try with different parameters
+        try:
+            vals, vecs = eigsh(-Hr, k=q, which="LA", 
+                              tol=1e-3, maxiter=5000)
+        except Exception:
+            # Fallback strategy 2: Reduce number of requested eigenvectors
+            try:
+                # Try with fewer eigenvectors
+                k_reduced = max(2, q - 2)
+                vals, vecs = eigsh(-Hr, k=k_reduced, which="LA", 
+                                  tol=1e-3, maxiter=2000)
+                
+                # If we got fewer eigenvectors than requested, pad with zeros
+                if vecs.shape[1] < q:
+                    padding = np.zeros((n, q - vecs.shape[1]))
+                    vecs = np.hstack([vecs, padding])
+            except Exception:
+                # Last resort: use dense eigensolver if sparse methods fail
+                print(f"Warning: Falling back to dense eigensolver for Bethe-Hessian")
+                Hr_dense = Hr.toarray()
+                vals_dense, vecs_dense = np.linalg.eigh(-Hr_dense)
+                
+                # Take largest eigenvalues (which are at the end for -Hr)
+                idx = np.argsort(vals_dense)[-q:]
+                vals = vals_dense[idx]
+                vecs = vecs_dense[:, idx]
 
     # ---------- k-means & confidence -----------------------------------------
     km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
@@ -225,13 +283,231 @@ def bethe_hessian(
 
 
 # ---------------------------------------------------------------------------
+# 2) Normalised-Laplacian community step  (soft confidence)
+# ---------------------------------------------------------------------------
+def laplacian(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (norm-Laplacian) with 1/(1+dist) confidence.
+    """
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+
+    A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    L = csgraph.laplacian(A, normed=True).astype(float)
+
+    evals, evecs = np.linalg.eigh(L.toarray())
+    X = evecs[:, 1 : q + 1]  # bottom q (skip trivial)
+
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+    Q     = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+def regularized_laplacian(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (regularized Laplacian) with 1/(1+dist) confidence.
+    Uses L_reg = (D + τ I)^(-1/2) A (D + τ I)^(-1/2) with τ = 1.
+    """
+    # --- build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # --- adjacency and degrees
+    A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    deg      = np.array(A.sum(axis=1)).flatten()
+
+    # --- regularization
+    tau      = 1.0
+    D_reg    = sp.diags(deg + tau)
+    D_inv_s  = sp.diags(1.0 / np.sqrt(deg + tau))
+
+    # --- regularized Laplacian operator
+    L_reg    = D_inv_s @ A @ D_inv_s
+
+    # --- eigen-decomposition (dense for simplicity)
+    evals, evecs = np.linalg.eigh(L_reg.toarray())
+    # take top-q eigenvectors (largest eigenvalues)
+    X = evecs[:, -q:]
+
+    # --- k-means clustering
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+
+    # --- soft confidence from distance to centers
+    Q    = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+
+def morans(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    Spectral clustering (Moran's I operator) with 1/(1+dist) confidence.
+    Uses M = D^(-1/2) A D^(-1/2) - (1 1^T) / vol, where vol = sum_i d_i.
+    """
+    # --- build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # --- adjacency and degrees
+    A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    deg      = np.array(A.sum(axis=1)).flatten()
+    vol      = deg.sum()
+
+    # --- add regularization to avoid division by zero
+    tau      = 1e-8  # small regularization constant
+    deg_reg  = deg + tau
+    vol_reg  = deg_reg.sum()
+
+    # --- normalized adjacency with regularization
+    D_inv_s = sp.diags(1.0/np.sqrt(deg_reg))
+    P       = D_inv_s @ A @ D_inv_s  # still sparse
+
+    n = len(deg)
+    
+    # --- direct sparse matrix approach for better stability
+    # Create the constant term (1/vol) * (1 1^T) as a sparse matrix
+    ones_vec = np.ones(n) / np.sqrt(vol_reg)
+    J = sp.csr_matrix(np.outer(ones_vec, ones_vec))
+    M = P - J
+
+    # --- eigen-decomposition (using sparse eigensolvers with better parameters)
+    # Using shift-invert mode for better numerical stability
+    sigma = 0.5  # shift value near the eigenvalues we want
+    try:
+        # First attempt with shift-invert mode
+        evals, evecs = eigsh(M, k=q, which='LM', tol=1e-5, maxiter=10000,
+                             sigma=sigma, mode='normal')
+    except Exception:
+        # Fallback approach with simpler parameters if first attempt fails
+        try:
+            evals, evecs = eigsh(M, k=q, which='LM', tol=1e-3, maxiter=5000)
+        except Exception:
+            # Last resort: use dense eigensolver if sparse methods fail
+            M_dense = M.toarray()
+            evals, evecs = np.linalg.eigh(M_dense)
+            # Take largest eigenvalues
+            idx = np.argsort(evals)[-q:]
+            evals = evals[idx]
+            evecs = evecs[:, idx]
+    
+    # Sort by eigenvalue (if using sparse method)
+    if len(evals) == q:  # Only sort if we got exactly q eigenvalues
+        idx = np.argsort(evals)
+        evals = evals[idx]
+        evecs = evecs[:, idx]
+    
+    # take top-q eigenvectors (largest eigenvalues)
+    X = evecs[:, -q:]
+
+    # --- k-means clustering
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+
+    # --- soft confidence from distance to centers
+    Q    = _conf_from_center(X, mu)
+
+    return Q, hard, node2idx, idx2node
+
+
+# ---------------------------------------------------------------------------
+# 4) SCORE community step  (soft confidence)
+# ---------------------------------------------------------------------------
+def score(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    random_state : int = 42,
+):
+    """
+    SCORE: Spectral Clustering On Ratios‐of‐Eigenvectors.
+    1) Regularize adjacency A -> (D+τI)^(-1/2) A (D+τI)^(-1/2)
+    2) Compute top‐q eigenvectors v1…vq
+    3) Build ratio matrix R[i,ℓ] = v_{ℓ+1}[i]/(v1[i] + eps)
+    4) k-means on R, then soft confidence via 1/(1+dist)
+    """
+    # — build index mappings
+    nodes    = list(H_obs.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
+
+    # — adjacency + regularization
+    A    = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format='csr')
+    deg  = np.array(A.sum(axis=1)).ravel()
+    τ    = 1.0
+    D_s  = diags(1.0 / np.sqrt(deg + τ))
+    A_reg = D_s @ A @ D_s
+
+    # — leading q eigenvectors of A_reg
+    vals, vecs = eigsh(A_reg, k=q, which='LA', tol=1e-5)
+    v1 = vecs[:, 0]
+    eps = 1e-8
+
+    # — build ratio matrix R ∈ ℝ^{n×(q-1)}
+    R = np.zeros((n, q-1))
+    for ℓ in range(1, q):
+        R[:, ℓ-1] = vecs[:, ℓ] / (v1 + eps)
+
+    # — k-means + soft confidence
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(R)
+    hard = km.labels_
+    Q    = _conf_from_center(R, km.cluster_centers_)
+    return Q, hard, node2idx, idx2node
+
+
+# ---------------------------------------------------------------------------
+# Update get_callable to include the new methods
+# ---------------------------------------------------------------------------
+def get_callable(calls: Union[Tuple, str]):
+    func_dict = {
+        "bethe_hessian":     bethe_hessian,
+        "laplacian":         laplacian,
+        "regularized_laplacian": regularized_laplacian,
+        "morans":            morans,
+        "isomap":            isomap,
+        "score":             score,
+    }
+    if isinstance(calls, str):
+        return (func_dict[calls], func_dict[calls])
+    elif isinstance(calls, tuple):
+        if len(calls) == 2:
+            return (func_dict[calls[0]], func_dict[calls[1]])
+        elif len(calls) == 1:
+            return (func_dict[calls[0]], func_dict[calls[0]])
+        else:
+            raise ValueError("Invalid callable input")
+# ---------------------------------------------------------------------------
 # EM driver  – spectral dual
 # ---------------------------------------------------------------------------
 def duo_spec(
     H_obs            : nx.Graph,
     K                : int,
     num_balls        : int = 16,
-    *,
+    config           : tuple = (bethe_hessian, bethe_hessian),
     max_em_iters     : int   = 50,
     anneal_steps     : int   = 6,
     warmup_rounds    : int   = 2,
@@ -255,7 +531,7 @@ def duo_spec(
 
     best, hist = {"obj": -np.inf}, []
     no_imp     = 0
-
+    config = get_callable(config)
     def _current_lambda(step, base, ramp):
         if step <= 0:
             return 0.0
@@ -267,14 +543,14 @@ def duo_spec(
     for em in range(1, max_em_iters + 1):
 
         # ------------------------ community step ------------------------------
-        Q_comm, hard_comm, *_ = bethe_hessian(
+        Q_comm, hard_comm, *_ = config[0](
             subG, q=K, random_state=random_state
         )
         p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
         mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
 
         # ------------------------ geometry step -------------------------------
-        Q_geo, hard_geo, *_ = bethe_hessian(
+        Q_geo, hard_geo, *_ = config[1](
             subG, q=num_balls, random_state=random_state
         )
         same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
