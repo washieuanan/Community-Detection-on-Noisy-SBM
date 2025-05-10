@@ -30,6 +30,13 @@ def coords_str2arr(G: nx.Graph, dim = 16):
         if len(coord_arr) != dim:
             coord_arr = np.zeros(dim)
         G.nodes[n]["coords"] = coord_arr
+        
+    for u, v in G.edges():
+        if "dist" in G.edges[u, v]:
+            dist = G.edges[u, v]["dist"]
+            if isinstance(dist, str):
+                dist = float(dist)
+            G.edges[u, v]["dist"] = dist
     return G
 
 if __name__ == "__main__":
@@ -44,7 +51,7 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.INFO)
     # logging.getLogger().addHandler(handler)
     
-    G = nx.read_gml("amazon_metadata_test/amazon_categories_cosine.gml")
+    G = nx.read_gml("amazon_metadata_test/amazon_hamming_inv_videoDVD.gml")
     G = coords_str2arr(G)
     # Subsample G to 25% of its nodes
     num_nodes = int(0.10 * G.number_of_nodes())
@@ -66,21 +73,21 @@ if __name__ == "__main__":
     
     results_folder = "amazon_metadata_test/"
     # add distances to G - use more sophisticated distance scaling approach
-    # max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
-    # for u, v in G.edges():
-    #     dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
-    #     # Use modified sigmoid with better scaling
-    #     scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
-    #     G.edges[u, v]["dist"] = scaled_dist
-    #     G.edges[v, u]["dist"] = scaled_dist
+    max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
+    for u, v in G.edges():
+        dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
+        # Use modified sigmoid with better scaling
+        scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
+        G.edges[u, v]["dist"] = scaled_dist
+        G.edges[v, u]["dist"] = scaled_dist
     print("Added distances to edges")
     
     res = duo_spec(
         G,
         K=2,
         num_balls=32,
-        config = ('score', 'isomap'),
-        warmup_rounds=10
+        config = ('bethe_hessian', 'bethe_hessian'),
+        warmup_rounds=2
     )
     # res = duo_bp(
     #     G, 
