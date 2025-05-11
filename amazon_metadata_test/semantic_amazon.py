@@ -60,8 +60,10 @@ def build_category_graph_semantic(
     """
     Build G where each node has:
       - 'coords': the mean semantic embedding of its category names
-    Each edge (u,v) gets attribute:
-      - 'dist': cosine-distance = 1.0 – cosine_similarity(coords_u, coords_v)
+
+    Each edge (u,v) gets attributes:
+      - 'cosine_dist': 1 – cosine_similarity(coords_u, coords_v)
+      - 'dist':        Euclidean distance ||coords_u – coords_v||_2
     """
     if not _HAS_SBT:
         raise ImportError(
@@ -72,6 +74,7 @@ def build_category_graph_semantic(
 
     # 2) Load semantic embedder
     model = SentenceTransformer(embed_model_name)
+    dim   = model.get_sentence_embedding_dimension()
 
     # cache embeddings for each unique category string
     cat_cache: dict[str, np.ndarray] = {}
@@ -81,27 +84,30 @@ def build_category_graph_semantic(
         asin = G.nodes[idx]['asin']
         cats = products[asin].get('categories', [])
         if not cats:
-            # fallback to zero‐vector if no categories
-            vec = np.zeros(model.get_sentence_embedding_dimension())
+            vec = np.zeros(dim)
         else:
             embeds = []
             for cat in cats:
                 if cat not in cat_cache:
                     cat_cache[cat] = model.encode(cat, convert_to_numpy=True)
                 embeds.append(cat_cache[cat])
-            # average and normalize
             vec = np.mean(embeds, axis=0)
             norm = np.linalg.norm(vec)
             if norm > 0:
                 vec = vec / norm
         G.nodes[idx]['coords'] = vec
 
-    # 4) Compute cosine‐distance on each edge
+    # 4) Compute both distances on each edge
     for u, v in G.edges():
-        cu = G.nodes[u]['coords'].reshape(1, -1)
-        cv = G.nodes[v]['coords'].reshape(1, -1)
-        sim = cosine_similarity(cu, cv)[0, 0]
-        G.edges[u, v]['dist'] = 1.0 - sim
+        cu = G.nodes[u]['coords']
+        cv = G.nodes[v]['coords']
+
+        # semantic distance
+        sim = cosine_similarity(cu.reshape(1,-1), cv.reshape(1,-1))[0, 0]
+        G.edges[u, v]['cosine_dist'] = 1.0 - sim
+
+        # Euclidean (geometric) distance
+        G.edges[u, v]['dist'] = np.linalg.norm(cu - cv)
 
     return G
 
@@ -114,8 +120,25 @@ if __name__ == "__main__":
         subsampled_classes=['DVD','Video'],
         embed_model_name='all-MiniLM-L6-v2'
     )
-    print("Nodes:", G.number_of_nodes(), "Edges:", G.number_of_edges())
-    # Example inspect
-    print("Sample node coords shape:", G.nodes[0]['coords'].shape)
-    print("Sample edge dist:", next(iter(G.edges(data=True))))
-    nx.write_gml(G, 'amazon_metadata_test/amazon_semantic_videoDVD.gml')
+print("Nodes:", G.number_of_nodes(), "Edges:", G.number_of_edges())
+# Example inspect
+print("Sample node coords shape:", G.nodes[0]['coords'].shape)
+print("Sample edge dist:", next(iter(G.edges(data=True))))
+
+# Convert all numeric values to strings before writing to GML
+# Convert node coordinates
+for node in G.nodes():
+    if 'coords' in G.nodes[node]:
+        coords = G.nodes[node]['coords']
+        # Convert numpy array to comma-separated string
+        G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+
+# Convert edge attributes
+for u, v, data in G.edges(data=True):
+    if 'cosine_dist' in data:
+        data['cosine_dist'] = str(data['cosine_dist'])
+    if 'dist' in data:
+        data['dist'] = str(data['dist'])
+
+# Now write to GML
+nx.write_gml(G, 'amazon_metadata_test/amazon_semantic_videoDVD.gml')

@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.vectorized_bp import belief_propagation
+from community_detection.bp.vectorized_bp import belief_propagation
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
+from community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 from scipy.sparse import diags
 from sklearn.cluster import KMeans
@@ -22,6 +22,138 @@ from scipy.sparse.linalg import eigs
 from typing import Union, Tuple
 from scipy.sparse.linalg import LinearOperator, eigsh
 from scipy.sparse.csgraph import shortest_path
+import math
+from copy import deepcopy
+from typing import Hashable, Iterable
+from numpy.random import default_rng
+from experiments.community_detection.bp.duo_bp import duo_bp
+from sklearn.neighbors import KernelDensity
+from scipy.linalg import eigh
+# censoring schemes
+# ---------------------------------------------------------------------
+# 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
+# ---------------------------------------------------------------------
+def erdos_renyi_mask(
+    G: nx.Graph,
+    rho: float,
+    *,
+    seed: int | None = None,
+    copy_node_attrs: bool = True,
+) -> nx.Graph:
+    """
+    Return a *censored* graph in which each edge of ``G`` is kept
+    independently with probability ``rho`` and deleted otherwise.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        The original (latent) graph.
+    rho : float in (0,1]
+        Retention probability P(edge is observed).
+    seed : int or None
+        Random-state seed for reproducibility.
+    copy_node_attrs : bool
+        If True, copy node attributes to the censored graph.
+
+    Returns
+    -------
+    H : networkx.Graph
+        Graph with the same node set as ``G`` but with
+        each edge kept w.p. ``rho``.
+    """
+    if not (0.0 <= rho <= 1.0):
+        raise ValueError("rho must be in [0,1]")
+
+    rng = default_rng(seed)
+    # --- create empty graph with same node set -----------------------
+    H = nx.Graph()
+    if copy_node_attrs:
+        # deep-copy node attributes
+        for u, attrs in G.nodes(data=True):
+            H.add_node(u, **deepcopy(attrs))
+    else:
+        H.add_nodes_from(G.nodes())
+
+    # --- Bernoulli retention for each edge ---------------------------
+    for u, v, attrs in G.edges(data=True):
+        if rng.random() < rho:
+            H.add_edge(u, v, **deepcopy(attrs))
+
+    return H
+
+
+# ---------------------------------------------------------------------
+# 2)  Geometric censoring  (keep edges whose ‖coords_u – coords_v‖ ≤ r)
+# ---------------------------------------------------------------------
+def geometric_censor(
+    G: nx.Graph,
+    r: float,
+    *,
+    coord_key: str = "coords",
+    metric: str = "euclidean",
+    copy_node_attrs: bool = True,
+) -> nx.Graph:
+    """
+    Keep only those edges whose *geometric* distance between the
+    incident vertices is ≤ r.
+
+    Each node is expected to have a coordinate attribute (default
+    name ``"coords"``) that is an iterable of floats, e.g. a 2- or
+    3-dimensional position.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Original graph (must have node attribute ``coord_key``).
+    r : float
+        Retention distance threshold (Euclidean by default).
+    coord_key : str
+        Node-attribute name that contains coordinates.
+    metric : {"euclidean"}  (placeholder for future metrics)
+    copy_node_attrs : bool
+        If True, node attributes are copied into the censored graph.
+
+    Returns
+    -------
+    H : networkx.Graph
+        Graph with exactly those edges (u,v) whose coordinate distance
+        ≤ r.  All vertices of ``G`` are preserved.
+    """
+    if r < 0:
+        raise ValueError("distance threshold r must be non-negative")
+
+    if metric != "euclidean":
+        raise NotImplementedError("Only Euclidean metric supported")
+
+    # --- helper to compute Euclidean distance quickly ---------------
+    def _dist(a: Iterable[float], b: Iterable[float]) -> float:
+        diff = np.fromiter(a, float) - np.fromiter(b, float)
+        return float(np.sqrt(np.dot(diff, diff)))
+
+    # --- create new graph with same nodes ---------------------------
+    H = nx.Graph()
+    if copy_node_attrs:
+        for u, attrs in G.nodes(data=True):
+            H.add_node(u, **deepcopy(attrs))
+    else:
+        H.add_nodes_from(G.nodes())
+
+    # --- iterate over edges & keep those within r --------------------
+    for u, v, attrs in G.edges(data=True):
+        try:
+            cu = G.nodes[u][coord_key]
+            cv = G.nodes[v][coord_key]
+        except KeyError as exc:
+            raise KeyError(
+                f"Node missing '{coord_key}' attribute needed for "
+                "geometric censoring"
+            ) from exc
+
+        if _dist(cu, cv) <= r:
+            H.add_edge(u, v, dist = _dist(cu, cv))
+
+    return H
+
 
 def create_dist_observed_subgraph(num_coords, observations):
     """
@@ -35,6 +167,145 @@ def create_dist_observed_subgraph(num_coords, observations):
     for p, d in observations:
         subG.add_edge(p[0], p[1], dist=d)
     return subG
+
+
+def ising_cut_cleaner(G, labels, weight="weight"):
+    """
+    Perform one deterministic Ising-cut sweep on G.
+    
+    Parameters
+    ----------
+    G : networkx.Graph
+        Graph whose edges carry a numeric `weight` attribute.
+    labels : dict
+        Mapping node -> community label (any hashable).
+    weight : str
+        Name of the edge attribute to use as the coupling strength.
+    
+    Returns
+    -------
+    new_labels : dict
+        Copy of labels with some nodes flipped if it reduces the Ising energy.
+    """
+    new_labels = labels.copy()
+    for u in G.nodes():
+        # aggregate neighbor‐weights by their labels
+        wsum = defaultdict(float)
+        for v, dat in G[u].items():
+            w = dat.get(weight, 1.0)
+            wsum[labels[v]] += w
+        # pick the neighbor‐label with maximum total weight
+        best_label, best_w = max(wsum.items(), key=lambda x: x[1], default=(labels[u], 0.0))
+        # current-label weight
+        curr_w = wsum.get(labels[u], 0.0)
+        # flip if another label has strictly more support
+        if best_label != labels[u] and best_w > curr_w:
+            new_labels[u] = best_label
+    return new_labels
+
+
+# ---------- New helper  -----------------------------------------------
+def add_gaussian_weights_from_dist(G, sigma=None, scale=1.0):
+    dists = [dat["dist"] for _,_,dat in G.edges(data=True)]
+    if sigma is None:
+        sigma = np.median(dists) or 1.0
+    for _,_,dat in G.edges(data=True):
+        if "weight" not in dat:          # preserve EM-updated weights
+            dat["weight"] = np.exp(-0.5*(dat["dist"]/(sigma*scale))**2)
+
+def add_localscale_weights(G, k=5):
+    dmat = defaultdict(list)
+    for u, v, d in G.edges(data=True):
+        dmat[u].append(d["dist"])
+        dmat[v].append(d["dist"])
+
+    sigma = {u: np.median(sorted(ds)[:k]) for u, ds in dmat.items()}
+
+    for u, v, d in G.edges(data=True):
+        d["weight"] = np.exp(-0.5*(d["dist"]/(sigma[u]*sigma[v]))**2)
+
+
+def renormalise_for_sampling(G, C):
+    n      = G.number_of_nodes()
+    p_obs  = C / (n*(n-1)/2)
+    for _,_,d in G.edges(data=True):
+        d["weight"] /= max(p_obs, 1e-9)        # debias, clip for safety
+
+
+def add_jaccard_edges(
+    G: nx.Graph,
+    frac_keep: float = 0.02,          # add at most this fraction of |E| edges
+    min_common: int  = 2,             # need ≥ 2 shared neighbours
+    w_scale: float   = 0.05,          # ≤ 5 % of the weakest real edge
+    tag: str         = "ghost",       # so _scale_or_prune() can skip them
+) -> int:
+    """
+    Two-hop Jaccard edge completion.
+    Adds light auxiliary edges between pairs that are *not* observed but
+    share many neighbours.  The weight is
+        w_ij = min{ Jaccard(i,j) , w_scale } · w_min,
+    where w_min is the smallest existing real edge weight.
+    Returns
+    -------
+    n_added : how many edges were inserted.
+    """
+    # ---------- basic book-keeping ------------------------------------------
+    adj  = {u: set(G.neighbors(u)) for u in G}
+    w_min = min(d.get("weight", 1.0) for _, _, d in G.edges(data=True))
+    cand  = {}
+
+    # ---------- gather candidates (two hops) ---------------------------------
+    for u in G:
+        for w in adj[u]:
+            for v in adj[w]:
+                if v <= u or G.has_edge(u, v):
+                    continue                      # ignore existing / duplicates
+                inter = adj[u].intersection(adj[v])
+                if len(inter) < min_common:
+                    continue
+                jacc  = len(inter) / len(adj[u].union(adj[v]))
+                cand[(u, v)] = jacc
+
+    if not cand:
+        return 0
+
+    # ---------- keep strongest frac_keep -------------------------------------
+    k_top   = max(1, int(frac_keep * G.number_of_edges()))
+    top     = sorted(cand.items(), key=lambda kv: kv[1], reverse=True)[:k_top]
+
+    # ---------- insert -------------------------------------------------------
+    for (u, v), j in top:
+        w     = min(j, w_scale) * w_min
+        d_est = np.sqrt(-2.0 * np.log(j + 1e-12))   # crude inverse-Gaussian
+        G.add_edge(u, v,
+                weight = w,
+                dist   = d_est,   #  ←  NEW, any positive placeholder works
+                **{tag: True})
+
+    return len(top)
+
+def kl_refine(G, labels):
+    improved = True
+    while improved:
+        improved = False
+        for u in G:
+            cur = labels[u]
+            # Δscore if we flip to the other block
+            delta = sum(d["weight"]*(labels[v]==cur) for v,d in G[u].items()) \
+                  - sum(d["weight"]*(labels[v]!=cur) for v,d in G[u].items())
+            if delta < 0:  # flipping lowers “cut” → better clustering
+                labels[u] = 1-cur
+                improved = True
+    return labels
+
+def label_propagation(G, labels, rounds=10):
+    for _ in range(rounds):
+        for u in G.nodes():
+            votes = defaultdict(float)
+            for v,d in G[u].items():
+                votes[labels[v]] += d["weight"]
+            labels[u] = max(votes, key=votes.get)
+    return labels
 
 
 ###############################################################################
@@ -98,6 +369,11 @@ def _scale_or_prune(
     for (u, v), m, p in zip(edges, mask, probs):
         if not m:
             continue
+        dat = G[u][v]
+        if dat.get("ghost"): 
+            continue
+        if dat.get("ghost_knn"):
+            continue
         w = G[u][v].get("weight", 1.0)
         w *= 1.0 - lam * p        # shrink
         if w < w_min:
@@ -143,16 +419,33 @@ def _largest_nb_eig(G, nodes, max_iter=200, tol=1e-5, seed=42):
     x     = rng.standard_normal(n_dir)
     x    /= norm(x)
     lam   = 0.0
+    # for _ in range(max_iter):
+    #     x_new = np.zeros_like(x)
+    #     for i, js in enumerate(nbr):
+    #         x_new[i] = x[js].sum()
+    #     lam_new = norm(x_new)
+    #     x_new  /= lam_new
+    #     if abs(lam_new - lam) < tol * lam_new:
+    #         lam = lam_new
+    #         break
+    #     x, lam = x_new, lam_new
     for _ in range(max_iter):
-        x_new = np.zeros_like(x)
+        x_new.fill(0.0)
         for i, js in enumerate(nbr):
-            x_new[i] = x[js].sum()
+            if js:                       # skip dangling edges
+                x_new[i] = x[js].sum()
+
         lam_new = norm(x_new)
-        x_new  /= lam_new
+        if lam_new < 1e-12:              # <- NEW: vector collapsed
+            x = rng.standard_normal(n_dir)
+            x /= norm(x)
+            continue                     # fresh restart
+
+        x_new /= lam_new
         if abs(lam_new - lam) < tol * lam_new:
-            lam = lam_new
-            break
+            return lam_new               # converged
         x, lam = x_new, lam_new
+
     return lam        # leading eigen-value ρ
 
 
@@ -177,7 +470,7 @@ def bethe_hessian(
     H_obs           : nx.Graph,
     q               : int,
     *,
-    use_nonbacktracking : bool = True,
+    use_nonbacktracking : bool = False,
     weight_from_dist    : bool = True,
     sigma_scale         : float = 1.0,
     random_state        : int   = 42,
@@ -198,10 +491,13 @@ def bethe_hessian(
 
     # ---------- (optional) weight from 'dist' ---------------------------------
     if weight_from_dist:
-        d_vals = np.array([d["dist"] for _, _, d in H_obs.edges(data=True)])
+        d_vals = np.array([d.get("dist", 1.0) for _, _, d in H_obs.edges(data=True)])
         sigma  = (np.median(d_vals) or 1.0) * sigma_scale
         for u, v, d in H_obs.edges(data=True):
-            d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
+            if "dist" in d:
+                d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
+            else:
+                d["weight"] = 1.0  # Default weight when dist is not available
 
     A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
                                    format="csr", weight="weight")
@@ -209,69 +505,16 @@ def bethe_hessian(
     D   = diags(deg)
 
     # ---------- choose r ------------------------------------------------------
+    # ---------- choose r ----------------  ----------------------------------
     if use_nonbacktracking:
-        # build non‐backtracking operator B of size (2m×2m)
-        # list all directed edges
-        directed_edges = [(u, v) for u, v in H_obs.edges()] + [(v, u) for u, v in H_obs.edges()]
-        m = len(directed_edges)
-        edge_idx = {e: i for i, e in enumerate(directed_edges)}
-
-        rows = []
-        cols = []
-        data = []
-        for (u, v) in directed_edges:
-            for w in H_obs.neighbors(v):
-                if w == u:
-                    continue
-                rows.append(edge_idx[(u, v)])
-                cols.append(edge_idx[(v, w)])
-                data.append(1.0)
-        B = sp.csr_matrix((data, (rows, cols)), shape=(m, m), dtype=np.float64)
-
-        # compute the leading eigenvalue of B
-        rho = np.real(eigs(B, k=1, which='LR', return_eigenvectors=False)[0])
-        r = np.sqrt(rho)
+        raise NotImplementedError("non-backtracking r not yet hooked in")
     r = np.sqrt(deg.mean())
 
     # ---------- Bethe–Hessian -------------------------------------------------
     I  = diags(np.ones(n))
-    # Add a small regularization term to improve matrix conditioning
-    eps = 1e-6
-    Hr = (r * r - 1.0) * I - r * A + D + eps * sp.eye(n)
-    
-    # Use more robust eigenvalue computation with fallback options
-    try:
-        # First attempt with shift-invert mode for better numerical stability
-        sigma = 1.0  # shift value
-        vals, vecs = eigsh(-Hr, k=q, which="LM", sigma=sigma, 
-                          tol=1e-5, maxiter=10000, mode='normal')
-    except Exception as e:
-        # Fallback strategy 1: Try with different parameters
-        try:
-            vals, vecs = eigsh(-Hr, k=q, which="LA", 
-                              tol=1e-3, maxiter=5000)
-        except Exception:
-            # Fallback strategy 2: Reduce number of requested eigenvectors
-            try:
-                # Try with fewer eigenvectors
-                k_reduced = max(2, q - 2)
-                vals, vecs = eigsh(-Hr, k=k_reduced, which="LA", 
-                                  tol=1e-3, maxiter=2000)
-                
-                # If we got fewer eigenvectors than requested, pad with zeros
-                if vecs.shape[1] < q:
-                    padding = np.zeros((n, q - vecs.shape[1]))
-                    vecs = np.hstack([vecs, padding])
-            except Exception:
-                # Last resort: use dense eigensolver if sparse methods fail
-                print(f"Warning: Falling back to dense eigensolver for Bethe-Hessian")
-                Hr_dense = Hr.toarray()
-                vals_dense, vecs_dense = np.linalg.eigh(-Hr_dense)
-                
-                # Take largest eigenvalues (which are at the end for -Hr)
-                idx = np.argsort(vals_dense)[-q:]
-                vals = vals_dense[idx]
-                vecs = vecs_dense[:, idx]
+    Hr = (r * r - 1.0) * I - r * A + D
+
+    vals, vecs = eigsh(-Hr, k=q, which="LA")   # (n,q)
 
     # ---------- k-means & confidence -----------------------------------------
     km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
@@ -282,34 +525,219 @@ def bethe_hessian(
     return Q, hard, node2idx, idx2node
 
 
-# ---------------------------------------------------------------------------
-# 2) Normalised-Laplacian community step  (soft confidence)
-# ---------------------------------------------------------------------------
+# # ---------------------------------------------------------------------------
+# # 2) Normalised-Laplacian community step  (soft confidence)
+# # ---------------------------------------------------------------------------
+# def laplacian(
+#     H_obs        : nx.Graph,
+#     q            : int,
+#     *,
+#     random_state : int = 42,
+# ):
+#     """
+#     Spectral clustering (norm-Laplacian) with 1/(1+dist) confidence.
+#     """
+#     nodes    = list(H_obs.nodes())
+#     node2idx = {u: i for i, u in enumerate(nodes)}
+#     idx2node = {i: u for u, i in node2idx.items()}
+
+#     A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+#     L = csgraph.laplacian(A, normed=True).astype(float)
+
+#     evals, evecs = np.linalg.eigh(L.toarray())
+#     X = evecs[:, 1 : q + 1]  # bottom q (skip trivial)
+
+#     km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+#     hard  = km.labels_
+#     mu    = km.cluster_centers_
+#     Q     = _conf_from_center(X, mu)
+
+#     return Q, hard, node2idx, idx2node
+
+# def regularized_laplacian(
+#     H_obs        : nx.Graph,
+#     q            : int,
+#     *,
+#     random_state : int = 42,
+# ):
+#     """
+#     Spectral clustering (regularized Laplacian) with 1/(1+dist) confidence.
+#     Uses L_reg = (D + τ I)^(-1/2) A (D + τ I)^(-1/2) with τ = 1.
+#     """
+#     # --- build index mappings
+#     nodes    = list(H_obs.nodes())
+#     node2idx = {u: i for i, u in enumerate(nodes)}
+#     idx2node = {i: u for u, i in node2idx.items()}
+#     n        = len(nodes)
+
+#     # --- adjacency and degrees
+#     A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+#     deg      = np.array(A.sum(axis=1)).flatten()
+
+#     # --- regularization
+#     tau      = 1.0
+#     D_reg    = sp.diags(deg + tau)
+#     D_inv_s  = sp.diags(1.0 / np.sqrt(deg + tau))
+
+#     # --- regularized Laplacian operator
+#     L_reg    = D_inv_s @ A @ D_inv_s
+
+#     # --- eigen-decomposition (dense for simplicity)
+#     evals, evecs = np.linalg.eigh(L_reg.toarray())
+#     # take top-q eigenvectors (largest eigenvalues)
+#     X = evecs[:, -q:]
+
+#     # --- k-means clustering
+#     km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+#     hard = km.labels_
+#     mu   = km.cluster_centers_
+
+#     # --- soft confidence from distance to centers
+#     Q    = _conf_from_center(X, mu)
+
+#     return Q, hard, node2idx, idx2node
+
+
+# def laplacian(
+#     H_obs        : nx.Graph,
+#     q            : int,
+#     *,
+#     random_state : int = 42,
+# ):
+#     """
+#     Spectral clustering (norm-Laplacian) with 1/(1+dist) confidence,
+#     using ARPACK for the bottom q+1 eigenpairs of L_norm.
+#     """
+#     # --- build index mappings
+#     nodes    = list(H_obs.nodes())
+#     node2idx = {u: i for i, u in enumerate(nodes)}
+#     idx2node = {i: u for u, i in node2idx.items()}
+#     n        = len(nodes)
+
+#     # --- normalized Laplacian (sparse)
+#     A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+#     L = csgraph.laplacian(A, normed=True)
+
+#     # --- choose ARPACK params
+#     m   = q + 1
+#     ncv = min(n - 1, max(2 * (m + 20), 10 * m))
+
+
+#     # # --- compute smallest m eigenpairs of L
+#     # evals, evecs = eigsh(
+#     #     L,
+#     #     k=m,
+#     #     sigma=0.0,
+#     #     which="LM",
+#     #     ncv=ncv,
+#     #     tol=1e-4,
+#     #     maxiter=10000
+#     # )
+#     I = sp.eye(n, format="csr")
+#     M = I - L
+#     evals_M, evecs = eigsh(
+#         M,
+#         k=m,
+#         which="LA",     # largest algebraic
+#         ncv=ncv,
+#         tol=1e-4,
+#         maxiter=10000
+#     )
+# # recover L's top-of-the-bottom spectrum:
+#     evals = 1 - evals_M
+
+
+#     # --- drop the trivial eigenvector and keep next q
+#     X = evecs[:, 1 : m]
+
+#     # --- k-means + soft confidence
+#     km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+#     hard = km.labels_
+#     mu   = km.cluster_centers_
+#     Q    = _conf_from_center(X, mu)
+
+#     return Q, hard, node2idx, idx2node
+
 def laplacian(
     H_obs        : nx.Graph,
     q            : int,
     *,
     random_state : int = 42,
 ):
-    """
-    Spectral clustering (norm-Laplacian) with 1/(1+dist) confidence.
-    """
     nodes    = list(H_obs.nodes())
     node2idx = {u: i for i, u in enumerate(nodes)}
     idx2node = {i: u for u, i in node2idx.items()}
+    n        = len(nodes)
 
     A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
-    L = csgraph.laplacian(A, normed=True).astype(float)
+    L = csgraph.laplacian(A, normed=True)
 
-    evals, evecs = np.linalg.eigh(L.toarray())
-    X = evecs[:, 1 : q + 1]  # bottom q (skip trivial)
+    m   = q + 1
+    base_ncv = min(n - 1, max(m + 20, 5 * m))
 
-    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
-    hard  = km.labels_
-    mu    = km.cluster_centers_
-    Q     = _conf_from_center(X, mu)
+    # STEP 1: try eigsh on M = I - L
+    try:
+        M = sp.eye(n, format="csr") - L
+        evals_M, evecs = eigsh(
+            M,
+            k=m,
+            which="LA",
+            ncv=base_ncv,
+            tol=1e-4,
+            maxiter=10000
+        )
+        evals = 1 - evals_M
+
+    except (ArpackNoConvergence, ArpackError):
+        # bump ncv and retry once
+        try:
+            bigger_ncv = min(n - 1, base_ncv * 2)
+            evals_M, evecs = eigsh(
+                M,
+                k=m,
+                which="LA",
+                ncv=bigger_ncv,
+                tol=1e-4,
+                maxiter=10000
+            )
+            evals = 1 - evals_M
+
+        except (ArpackNoConvergence, ArpackError):
+            # STEP 2: fallback to shift-invert on L (if you still want it)
+            try:
+                evals, evecs = eigsh(
+                    L,
+                    k=m,
+                    sigma=0.0,
+                    which="LM",
+                    ncv=base_ncv,
+                    tol=1e-4,
+                    maxiter=10000
+                )
+            except (ArpackNoConvergence, RuntimeError, ArpackError):
+                # STEP 3: try LOBPCG
+                np.random.seed(random_state)
+                X0 = np.random.randn(n, m)
+
+                try:
+                    evals, evecs = lobpcg(L, X0, largest=False, tol=1e-4, maxiter=200)
+                except Exception:
+                    # FINAL FALLBACK: dense eigh
+                    L_dense = L.toarray()
+                    all_vals, all_vecs = np.linalg.eigh(L_dense)
+                    evals, evecs = all_vals[:m], all_vecs[:, :m]
+
+    # drop trivial eigenvector (first one) and keep next q
+    X = evecs[:, 1:m]
+
+    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+    Q    = _conf_from_center(X, mu)
 
     return Q, hard, node2idx, idx2node
+
+
 
 def regularized_laplacian(
     H_obs        : nx.Graph,
@@ -318,8 +746,9 @@ def regularized_laplacian(
     random_state : int = 42,
 ):
     """
-    Spectral clustering (regularized Laplacian) with 1/(1+dist) confidence.
-    Uses L_reg = (D + τ I)^(-1/2) A (D + τ I)^(-1/2) with τ = 1.
+    Spectral clustering on the regularized Laplacian
+      L_reg = (D + τI)^(-1/2) A (D + τI)^(-1/2),
+    using ARPACK to get the top-q eigenvectors.
     """
     # --- build index mappings
     nodes    = list(H_obs.nodes())
@@ -327,32 +756,42 @@ def regularized_laplacian(
     idx2node = {i: u for u, i in node2idx.items()}
     n        = len(nodes)
 
-    # --- adjacency and degrees
-    A        = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
-    deg      = np.array(A.sum(axis=1)).flatten()
+    # --- adjacency & degree
+    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
+    deg = np.array(A.sum(axis=1)).ravel()
 
     # --- regularization
-    tau      = 1.0
-    D_reg    = sp.diags(deg + tau)
-    D_inv_s  = sp.diags(1.0 / np.sqrt(deg + tau))
+    tau     = 1.0
+    D_inv_s = sp.diags(1.0 / np.sqrt(deg + tau))
 
-    # --- regularized Laplacian operator
-    L_reg    = D_inv_s @ A @ D_inv_s
+    # --- form L_reg
+    L_reg = D_inv_s @ A @ D_inv_s
 
-    # --- eigen-decomposition (dense for simplicity)
-    evals, evecs = np.linalg.eigh(L_reg.toarray())
-    # take top-q eigenvectors (largest eigenvalues)
-    X = evecs[:, -q:]
+    # --- choose ARPACK params
+    m   = q
+    ncv = min(n - 1, max(m + 20, 5 * m))
 
-    # --- k-means clustering
+    # --- compute the q largest eigenpairs of L_reg
+    evals, evecs = eigsh(
+        L_reg,
+        k=m,
+        which="LA",
+        ncv=ncv,
+        tol=1e-4,
+        maxiter=10000
+    )
+
+    # --- use those q eigenvectors directly
+    X = evecs
+
+    # --- k-means + soft confidence
     km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
     hard = km.labels_
     mu   = km.cluster_centers_
-
-    # --- soft confidence from distance to centers
     Q    = _conf_from_center(X, mu)
 
     return Q, hard, node2idx, idx2node
+
 
 
 def morans(
@@ -463,7 +902,7 @@ def score(
     A_reg = D_s @ A @ D_s
 
     # — leading q eigenvectors of A_reg
-    vals, vecs = eigsh(A_reg, k=q, which='LA', tol=1e-5)
+    vals, vecs = eigsh(A_reg, k=q, which='LA', tol=1e-5, maxiter=10000)
     v1 = vecs[:, 0]
     eps = 1e-8
 
@@ -488,7 +927,6 @@ def get_callable(calls: Union[Tuple, str]):
         "laplacian":         laplacian,
         "regularized_laplacian": regularized_laplacian,
         "morans":            morans,
-        "isomap":            isomap,
         "score":             score,
     }
     if isinstance(calls, str):
@@ -500,91 +938,146 @@ def get_callable(calls: Union[Tuple, str]):
             return (func_dict[calls[0]], func_dict[calls[0]])
         else:
             raise ValueError("Invalid callable input")
+
+
 # ---------------------------------------------------------------------------
-# EM driver  – spectral dual
+# helpers --------------------------------------------------------------------
+def _to_idx(edge_arr, n2i):
+    iu = np.fromiter((n2i[u] for u, _ in edge_arr), int, len(edge_arr))
+    iv = np.fromiter((n2i[v] for _, v in edge_arr), int, len(edge_arr))
+    return iu, iv
+
+
+def _edge_same_prob(Q, iu, iv):
+    """probability that two endpoints share the same label under Q."""
+    return (Q[iu] * Q[iv]).sum(1)
+
+
+def _scale_edges(G, mask, conf, lam, w_min, w_cap, mode="shrink"):
+    """Scale selected edges up/down.
+
+    Parameters
+    ----------
+    mask : bool array over `edges`
+    conf : confidence values (same shape)
+    lam  : scalar 0–1 shrink / boost magnitude
+    mode : "shrink" | "boost"
+    """
+    cnt = 0
+    for (flag, (u, v), c) in zip(mask, G.edges(), conf):
+        if not flag:
+            continue
+        w = G[u][v]["weight"]
+        if mode == "shrink":
+            new_w = max(w_min, w * (1.0 - lam))
+        else:                                   # boost
+            fac   = 1.0 + lam * c              # confidence-adaptive
+            new_w = min(w_cap, w * fac)
+        if abs(new_w - w) > 1e-12:
+            G[u][v]["weight"] = new_w
+            cnt += 1
+    return cnt
+
+
 # ---------------------------------------------------------------------------
+# main -----------------------------------------------------------------------
 def duo_spec(
-    H_obs            : nx.Graph,
-    K                : int,
-    num_balls        : int = 16,
-    config           : tuple = (bethe_hessian, bethe_hessian),
-    max_em_iters     : int   = 50,
-    anneal_steps     : int   = 6,
-    warmup_rounds    : int   = 2,
-    comm_cut         : float = 0.90,
-    geo_cut          : float = 0.90,
-    shrink_comm      : float = 1.00,
-    shrink_geo       : float = 0.80,
-    w_min            : float = 5e-2,
-    tol              : float = 1e-4,
-    patience         : int   = 7,
-    random_state     : int   = 0,
+    H_obs: nx.Graph,
+    K: int,
+    num_balls: int = 16,
+    config: tuple = ("bethe_hessian", "bethe_hessian"),
+    *,
+    # EM
+    max_em_iters=50,
+    anneal_steps=6,
+    warmup_rounds=2,
+    # percentile cuts
+    comm_cut=0.90,
+    geo_cut=0.90,
+    # shrink / boost strength
+    shrink_comm=1.00,
+    shrink_geo=0.80,
+    boost_comm=0.60,
+    boost_geo=0.40,
+    boost_cut_comm=0.97,
+    boost_cut_geo=0.97,
+    # weight bounds
+    w_min=5e-2,
+    w_cap=4.0,
+    # misc
+    tol=1e-4,
+    patience=7,
+    random_state=0,
 ):
-    """
-    Alternating EM-like refinement driven by the new confidence definition.
-    """
-    rng             = np.random.default_rng(random_state)
-    subG            = deepcopy(H_obs)
-    edges           = np.asarray(subG.edges(), dtype=object)
-    node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
-    iu_global, iv_global = _to_idx(edges, node2idx_global)
+    """Pure-spectral EM with both up- and down-weighting of edges."""
+    rng = np.random.default_rng(random_state)
+    subG = deepcopy(H_obs)
+    for _, _, d in subG.edges(data=True):
+        d.setdefault("weight", 1.0)
 
-    best, hist = {"obj": -np.inf}, []
-    no_imp     = 0
+    edges = np.asarray(subG.edges(), dtype=object)
+    node2idx = {u: i for i, u in enumerate(subG.nodes())}
+    iu_glob, iv_glob = _to_idx(edges, node2idx)
+
+    best, hist, no_imp = {"obj": -np.inf}, [], 0
     config = get_callable(config)
-    def _current_lambda(step, base, ramp):
-        if step <= 0:
-            return 0.0
-        if step >= ramp:
-            return base
-        return base * step / ramp
 
-    # --------------------------- EM loop -------------------------------------
+    def _lam(step, base):            # linear ramp-up after warm-up
+        d = step - warmup_rounds
+        if d <= 0:  return 0.0
+        return base if d >= anneal_steps else base * d / anneal_steps
+
+    # -----------------------------------------------------------------------
     for em in range(1, max_em_iters + 1):
-
-        # ------------------------ community step ------------------------------
+        # ---------------- community embedding -----------------------------
         Q_comm, hard_comm, *_ = config[0](
             subG, q=K, random_state=random_state
         )
-        p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
-        mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
+        p_same = _edge_same_prob(Q_comm, iu_glob, iv_glob)
+        mask_comm_shrink = p_same > np.percentile(p_same, comm_cut * 100)
+        mask_comm_boost  = p_same > np.percentile(p_same, boost_cut_comm * 100)
 
-        # ------------------------ geometry step -------------------------------
+        # ---------------- geometry embedding ------------------------------
         Q_geo, hard_geo, *_ = config[1](
             subG, q=num_balls, random_state=random_state
         )
-        same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
-        conf_g     = 0.5 * (Q_geo[iu_global, hard_geo[iu_global]] +
-                            Q_geo[iv_global, hard_geo[iv_global]])
-        mask_geo = same_ball & (
+        same_ball = hard_geo[iu_glob] == hard_geo[iv_glob]
+        conf_g = 0.5 * (Q_geo[iu_glob, hard_geo[iu_glob]] +
+                        Q_geo[iv_glob, hard_geo[iv_glob]])
+        mask_geo_shrink = same_ball & (
             conf_g > np.percentile(conf_g, geo_cut * 100)
         )
+        mask_geo_boost = same_ball & (
+            conf_g > np.percentile(conf_g, boost_cut_geo * 100)
+        )
 
-        # ------------------------ shrink / prune ------------------------------
-        λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
-        λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
+        # ---------------- edge re-weighting  ------------------------------
+        λc, λg = _lam(em, shrink_comm), _lam(em, shrink_geo)
+        λcB, λgB = _lam(em, boost_comm), _lam(em, boost_geo)
 
-        n_drop_comm = n_drop_geo = 0
-        if em > warmup_rounds:
-            n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
-            n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo),
-                                          λ_geo , w_min)
+        drop_c = _scale_edges(subG, mask_comm_shrink, p_same, λc,
+                              w_min, w_cap, "shrink")
+        drop_g = _scale_edges(subG, mask_geo_shrink,  conf_g, λg,
+                              w_min, w_cap, "shrink")
+        boost_c = _scale_edges(subG, mask_comm_boost, p_same, λcB,
+                               w_min, w_cap, "boost")
+        boost_g = _scale_edges(subG, mask_geo_boost,  conf_g, λgB,
+                               w_min, w_cap, "boost")
 
-        # ------------------------ objective & logging -------------------------
-        obj = float(np.max(Q_comm, axis=1).sum())   # higher is better
-        hist.append(dict(
-            iter=em, obj=obj, edges=subG.number_of_edges(),
-            drop_comm=n_drop_comm, drop_geo=n_drop_geo,
-            λ_comm=λ_comm, λ_geo=λ_geo,
-        ))
+        # ---------------- objective & bookkeeping -------------------------
+        obj = float(np.max(Q_comm, axis=1).sum())
+        hist.append(dict(it=em, obj=obj, edges=subG.number_of_edges(),
+                         shrink_comm=drop_c, shrink_geo=drop_g,
+                         boost_comm=boost_c,  boost_geo=boost_g))
 
         if obj > best["obj"]:
             best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
-                        node2idx=node2idx_global)
+                        node2idx=node2idx)
             no_imp = 0
         else:
             no_imp += 1
 
+        # early-stop conditions
         if no_imp >= patience:
             print(f"[EM] patience reached ({patience}) at iter {em}")
             break
@@ -597,13 +1090,139 @@ def duo_spec(
 
     hard_final = best["beliefs"].argmax(1)
     return dict(
-        beliefs     = best["beliefs"],
-        communities = hard_final,
-        balls       = best["balls"],
-        node2idx    = best["node2idx"],
-        idx2node    = {i: u for u, i in best["node2idx"].items()},
-        history     = hist,
+        beliefs=best["beliefs"],
+        communities=hard_final,
+        balls=best["balls"],
+        node2idx=best["node2idx"],
+        idx2node={i: u for u, i in best["node2idx"].items()},
+        history=hist,
+        G_final=subG,
     )
+# ----------------------------------------------------------- safe EM driver
+def duo_bprop(
+    G_obs              : nx.Graph,
+    K                  : int,
+    *,
+    # ---------------- algorithmic knobs ------------------------------
+    max_em_iters     = 50,
+    anneal_steps     = 8,
+    warmup_rounds    = 2,
+    # cut-offs
+    boost_cut        = 0.97,
+    add_cut          = 0.995,
+    geo_cut          = 0.90,
+    # magnitudes
+    boost_lambda0    = 0.30,
+    shrink_geo       = 0.80,
+    boost_cap        = 3.0,
+    w_add            = 0.5,
+    max_virtual      = 3,
+    w_min            = 5e-2,
+    # BP, misc ...
+    **kwargs,
+):
+    """
+    Safe EM-style refinement that *only* re-scales up/down existing edges
+    and (optionally) adds lightweight virtual edges between highly probable
+    same-community pairs.
+    """
+    rng   = np.random.default_rng(kwargs.get("seed", 0))
+    G     = deepcopy(G_obs)
+
+    # --- keep original weights for later restoration -----------------
+    for u, v, d in G.edges(data=True):
+        d.setdefault("weight", 1.0)
+        d["w_orig"]  = d["weight"]
+        d["w_extra"] = 0.0           # up-weights + virtual edges live here
+
+    hist, best, no_imp = [], {"obj":-np.inf}, 0
+
+    for em in range(1, max_em_iters+1):
+        # ---------------- BP for communities -------------------------
+        bel_c, _, n2i, _ = belief_propagation(G, q=K, **kwargs)
+        edges   = np.asarray(G.edges(), dtype=object)
+        iu, iv  = _to_idx(edges, n2i)
+        p_same  = _edge_same_prob(bel_c, iu, iv)
+
+        # percentile thresholds
+        th_boost = np.percentile(p_same, boost_cut*100)
+        mask_boost = p_same > th_boost                 # existing edges
+        # ------------------------------------------------------------- Boost
+        λ = min(boost_lambda0 * em / max(1, anneal_steps), boost_lambda0)
+        for flag, (u, v) in zip(mask_boost, edges):
+            if not flag:
+                continue
+            data = G.edges[u, v]
+            factor = 1 + λ
+            factor = min(factor, boost_cap)
+            data["w_extra"] = (factor-1)*data["w_orig"]
+
+        # ---------------- Geometry step  (soft down-weight) ----------
+        bel_g, _, n2i_g, _ = belief_propagation(G, q=min(16, K*2), **kwargs)
+        lbls_g = bel_g.argmax(1)
+        iu_g, iv_g = _to_idx(edges, n2i_g)
+        same_ball  = lbls_g[iu_g] == lbls_g[iv_g]
+        th_geo     = np.percentile(
+            0.5*(bel_g[iu_g,lbls_g[iu_g]]+bel_g[iv_g,lbls_g[iv_g]]),
+            geo_cut*100,
+        )
+        mask_geo = same_ball & (
+            0.5*(bel_g[iu_g,lbls_g[iu_g]]+bel_g[iv_g,lbls_g[iv_g]]) > th_geo
+        )
+
+        λ_geo = shrink_geo
+        for flag, (u, v) in zip(mask_geo, edges):
+            if not flag:
+                continue
+            data = G.edges[u, v]
+            data["w_extra"]-= λ_geo*data["w_orig"]      # soft shrink
+            # clip
+            if data["w_orig"]+data["w_extra"] < w_min:
+                data["w_extra"] = w_min-data["w_orig"]
+
+        # ------------------- Add virtual edges -----------------------
+        # sample up to max_virtual per node among absent pairs
+        th_add = np.percentile(p_same, add_cut*100)
+        # rank candidate non-edges
+        cand_idx = np.where(p_same > th_add)[0]
+        rng.shuffle(cand_idx)
+        added = 0
+        per_node = {u:0 for u in G}
+        for idx in cand_idx:
+            u, v = edges[idx]
+            if G.has_edge(u, v):          # only absent edges
+                continue
+            if per_node[u] >= max_virtual or per_node[v] >= max_virtual:
+                continue
+            G.add_edge(u, v,
+                       weight = w_add,
+                       w_orig = 0.0,
+                       w_extra= w_add)
+            per_node[u]+=1; per_node[v]+=1
+            added += 1
+
+        # ------------------ objective & bookkeeping ------------------
+        obj = float(np.max(bel_c, axis=1).sum())
+        hist.append(dict(it=em, obj=obj, added=added))
+
+        if obj > best["obj"]:
+            best.update(obj=obj, beliefs=bel_c, node2idx=n2i)
+            no_imp = 0
+        else:
+            no_imp += 1
+        if no_imp >= 7:
+            break
+
+    hard = best["beliefs"].argmax(1)
+    return dict(
+        beliefs=best["beliefs"],
+        communities=hard,
+        node2idx=best["node2idx"],
+        idx2node={i:u for u,i in best["node2idx"].items()},
+        history=hist,
+        G_final=G,                 # in case one wants to inspect weights
+    )
+
 
 
 def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000):
@@ -646,37 +1265,46 @@ if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 225
-    b = 75
-    n = 950
+    a = 30
+    b = 5
+    n = 350
     K = 2
-    r_in = a * np.log(n) / n
-    r_out = b * np.log(n) / n
+    r_in = np.sqrt(a * np.log(n) / n)
+    r_out = np.sqrt(b * np.log(n) / n)
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
-    G_true = generate_gbm(n=n, K=K, a=a, b=b, seed=42)
+    # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
+    G_true = generate_gbm(
+        n=n,
+        K=K,
+        a=a,
+        b=b,
+        seed=42
+    )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
     for u, v in G_true.edges():
         G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.005 * original_density
+    C = 0.8 * original_density
     # print("C:", C)
-    # def weight_func(c1, c2):
-    #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-    #     return 1.0
+    def weight_func(c1, c2):
+        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+        return 1.0
 
-    # num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    # sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # observations = sampler.observe()
+    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    observations = sampler.observe()
 
-    # obs_nodes: Set[int] = set()
-    # for p, d in observations:
-    #     obs_nodes.add(p[0])
-    #     obs_nodes.add(p[1])
+    obs_nodes: Set[int] = set()
+    for p, d in observations:
+        obs_nodes.add(p[0])
+        obs_nodes.add(p[1])
 
     # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
-    # print("Running Loopy BP …")
+    subG = erdos_renyi_mask(G_true, 0.005, seed=42)
+    # subG = geometric_censor(G_true, 0.3, coord_key="coords")
+    # # print("Running Loopy BP …")
     # beliefs, preds, node2idx, idx2node = belief_propagation(
     #     subG,
     #     q=K,
@@ -687,47 +1315,17 @@ if __name__ == "__main__":
     #     damping=0.15,   
     #     balance_regularization=0.05,
     # )
-    # _, labels, _, _ = gbm_em(
-    #     subG,
-    #     k=K,
-    #     dim=3,
-    #     epochs=100,
-    #     lr_x=0.05,
-    #     inner_grad_steps=500,
-    #     eps=1e-9
-    # )
-    # labels = spectral_clustering(subG, q=K, seed=42)
-    # preds = np.array([labels[i] for i in range(len(labels))])
-    # res = em_geometry_community(
-    #     subG,
-    #     K=K,
-    #     bp_kwargs=dict(
-    #         init = "random",
-    #         max_iter=1000,             # Increase max iterations
-    #         damping=0.4,                # Start with moderate damping 
-    #         balance_regularization=0.2, # Increase balance regularization
-    #         min_steps=70,               # Minimum steps before early convergence
-    #     ),
-    #     num_balls=32,                   # Reduced from 20 for better stability
-    #     max_em_iters=100,
-    #     # conf_threshold=0.75,             # Lower threshold for less aggressive pruning
-    #     tol=1e-6,
-    #     seed=42,
-    #     # ball_weight=0.55,                # Reduced ball pruning influence
-    #     # adaptive_min_edges=True,        # Adaptively decrease min_edges
-    #     # early_stopping_window=5,        # Stop if no improvement for 5 iterations
-    # )
-    # res = duo_bp(
-    #     subG,
-    #     K=K,
-    #     num_balls=32,
-    # )
+    
     res = duo_spec(
         G_true,
         K=K,
-        num_balls=32
     )
     preds = res["communities"]
+
+    # labels = spectral_clustering(subG, q=K, seed=42)
+    # preds = np.array([labels[i] for i in range(len(labels))])
+
+
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)
     # sub_preds = np.array([preds[i] for i in obs_nodes])
