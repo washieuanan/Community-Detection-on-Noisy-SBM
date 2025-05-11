@@ -32,7 +32,7 @@ def generate_gbm(n: int,
         raise ValueError("Pick a and b s.t. sqrt(a) - sqrt(b) > 2 * sqrt(2)")
 
     r_in = np.sqrt(a * np.log(n) / n)
-    r_out = np.sqrt(b * np.log(n) / n) 
+    r_out = np.sqrt(b * np.log(n) / n)
     p_in = a * np.log(n) / n
     p_out = b * np.log(n) / n
 
@@ -60,11 +60,11 @@ def generate_gbm(n: int,
         for j in range(i + 1, n): 
             d = np.linalg.norm(pts[i] - pts[j]) 
             if comm[i] == comm[j]: 
-                if d < r_in and rng.random() < p_in:
-                    G.add_edge(i,j) 
+                if d < r_in and rng.random() < p_in: 
+                    G.add_edge(i,j, dist=d) 
             else: 
-                if d < r_out and rng.random() < p_out:
-                    G.add_edge(i,j) 
+                if d < r_out and rng.random() < p_out: 
+                    G.add_edge(i,j, dist=d) 
     # discard_disconnected_nodes(G)
     return G
 

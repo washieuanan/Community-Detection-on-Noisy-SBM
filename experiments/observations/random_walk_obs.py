@@ -3,7 +3,7 @@ import networkx as nx
 import numpy as np
 
 from .observe import Observation
-from graph_generation.generate_graph import distance_function
+from experiments.graph_generation.generate_graph import distance_function
 
 
 from typing import List, Tuple, Optional, Any
