@@ -10,13 +10,15 @@ from networkx.readwrite import json_graph
 import numpy as np
 
 # Import both BP implementations
-from community_detection.bp.tests.bethe_duo_bp import duo_bp as bethe_bp
+# from community_detection.bp.tests.bethe_duo_bp import duo_bp as bethe_bp
 from community_detection.bp.tests.duo_bp import duo_bp as duo_bp
-from community_detection.bp.vectorized_bp import detection_stats, get_true_communities
+from community_detection.bp.vectorized_bp import get_true_communities
 from community_detection.bp.tests.duo_bp import create_dist_observed_subgraph
 from community_detection.bp.vectorized_bp import belief_propagation
 from controls.motif_count import motif_counting
 from controls.spectral import spectral_clustering
+from community_detection.duo_spec import duo_spec, detection_stats, bethe_hessian
+# from controls.spectral import bethe_hessian_clustering
 
 
 
@@ -66,74 +68,60 @@ def process_file(input_path, output_dir):
             print(f"    Warning: no observations for C = {C_level}")
             continue
 
-        # Build subgraph
+        # # Build subgraph
         subG = create_dist_observed_subgraph(len(G_full.nodes()), observations)
 
         # Container for this C-level
         results[C_level] = {}
 
-        # Run both BP methods
-        print("Running duo_bp...")
-        res = duo_bp(
-            subG,
-            K=parameters.get('K'),
-            seed=parameters.get('seed')
-        )
+        
+        # true_labels = get_true_communities(G_full, node2idx=None, attr="comm")
+        # # First, run duo_spec laplacian
+        # print("Running duo spectral laplacian...")
+        # duo_laplacian = duo_spec(subG, parameters['K'], num_balls=32, config='laplacian') 
+        # preds = duo_laplacian['communities']
 
-        # Retrieve true communities aligned by node2idx
-        preds = res["communities"]
-        true_comms = get_true_communities(G_full, node2idx=None, attr='comm')
+        # stats = detection_stats(preds, true_labels) 
 
-        # Compute stats
-        stats = detection_stats(preds, true_comms)
+        # results[C_level]['duo_spec_laplacian'] = {
+        #     'stats': stats,
+        #     'preds': preds
+        # } 
 
-        # Store
-        results[C_level]['duobp'] = {
+        # # Now, run duo_spec bethe
+        # print("Running duo spectral bethe...")
+        # duo_bethe = duo_spec(subG, parameters['K'], num_balls=32, config='bethe_hessian')
+        # preds = duo_bethe['communities']
+        # stats = detection_stats(preds, true_labels)
+        # results[C_level]['duo_spec_bethe'] = {
+        #     'stats': stats,
+        #     'preds': preds
+        # }
+
+        print("Now, running motif-counnting...")
+        # Run motif counting
+        preds = motif_counting(subG, parameters['K']) 
+        true_labels = get_true_communities(subG, node2idx=None, attr="comm")
+        stats = detection_stats(preds, true_labels)
+        results[C_level]['motif_counting'] = {
             'stats': stats,
             'preds': preds
         }
 
-        print("Running regular belief propagation...") 
-        _, preds, node2idx, _ = belief_propagation(
-            subG, 
-            q = parameters.get('K'), 
-            seed= parameters.get('seed'),
-            balance_regularization=0.05,
-            damping=0.15,
-            msg_init='random',
-            group_obs = None, 
-            max_iter= 5000, 
-            min_sep = 0.3
-        )
+        # Now, run regular Bethe-Hessian
+        print("Running bethe_hessian...")
 
-        true_comms = get_true_communities(G_full, node2idx=node2idx, attr='comm')
-        stats = detection_stats(preds, true_comms)
-
-        results[C_level]['bp'] = {
+        _, labels, _, _ = bethe_hessian(subG, parameters['K'])
+        nodes = list(subG.nodes())
+        # want something of this nature: np.array([labels[i] for i in range(len(nodes))])
+        preds = np.array([labels[i] for i in range(len(nodes))])
+        stats = detection_stats(preds, true_labels)
+        results[C_level]['bethe_hessian'] = {
             'stats': stats,
             'preds': preds
         }
 
-        # Now, run controls 
-        print("Running motif counting...")
-        preds = motif_counting(subG, q=2)
-
-        true_comms = get_true_communities(G_full, node2idx=None, attr='comm')
-        stats = detection_stats(preds, true_comms)
-
-        results[C_level]['motif'] = {
-            'stats': stats,
-            'preds': preds
-        }
-
-        print("Running spectral clustering...")
-        preds = spectral_clustering(subG, obs_data, q=2)
-        stats = detection_stats(preds, true_comms)
-        results[C_level]['spectral'] = {
-            'stats': stats,
-            'preds': preds
-        }
-
+    
 
     # Write results to JSON
     os.makedirs(output_dir, exist_ok=True)
@@ -147,14 +135,14 @@ def process_file(input_path, output_dir):
 
 def main():
     input_dir = 'datasets/GBM_W_OBS_DENSITY/'
-    output_dir = 'results/all_methods_corrected/'
+    output_dir = 'results/corrected_addl_methods/'
     os.makedirs(output_dir, exist_ok=True)
 
     json_files = sorted(glob.glob(os.path.join(input_dir, '*.json')))
     print(f"Found {len(json_files)} files in {input_dir}")
 
     # start after json 112
-    # json_files = json_files[27:]
+    json_files = json_files[86:]
     for path in json_files:
         process_file(path, output_dir)
 
