@@ -223,14 +223,16 @@ if __name__ == "__main__":
         get_true_communities,
     )
 
+
+
     # Generate latent GBM graph
-    G_true = generate_gbm(n=500, K=3, a=100, b=50, seed=123)
+    G_true = generate_gbm(n=500, K=2, a=100, b=50, seed=123)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.025 * original_density
+    C = 0.05 * original_density
 
     def weight_func(c1, c2):
-        return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+        return 1.0
 
     num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
     sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
@@ -246,49 +248,50 @@ if __name__ == "__main__":
         obs_nodes.update((u, v))
 
 
-    # # Run Bayesian inference
-    # bayes = BayesianGraphInference(
-    #     observations=observations_,
-    #     observed_nodes=obs_nodes,
-    #     total_nodes=G_true.number_of_nodes(),
-    #     obs_format="base",
-    #     n_candidates=2 ** 20,
-    #     seed=42,
-    # )
-    # G_pred = bayes.infer()
+    # Run Bayesian inference
+    bayes = BayesianGraphInference(
+        observations=observations_,
+        observed_nodes=obs_nodes,
+        total_nodes=G_true.number_of_nodes(),
+        obs_format="base",
+        n_candidates=2 ** 20,
+        seed=42,
+    )
+    G_pred = bayes.infer()
 
     # Build subgraph of observed nodes with inferred coords (for BP)
-    from community_detection.bp.gbm_bp import create_observed_subgraph
+    from community_detection.bp.duo_bp import create_dist_observed_subgraph, duo_bp
 
-    subG = create_observed_subgraph(G_true.number_of_nodes(), observations_)
-    # for n in subG.nodes():
-    #     subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
+    subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
+    for n in subG.nodes():
+        subG.nodes[n]["coords"] = G_pred.nodes[n]["coords"]
 
-    # # Attach edge potentials & run BP (unchanged vs. original)
-    # # change gamma to be 4 / avg deg
-    # gamma = 4 / avg_deg
-    # K = 3
-    # for G in (G_pred, subG):
-    #     for u, v in G.edges():
-    #         d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
-    #         psi = np.ones((K, K))
-    #         np.fill_diagonal(psi, np.exp(-gamma * d))
-    #         G[u][v]["psi"] = psi
+    # Attach edge potentials & run BP (unchanged vs. original)
+    # change gamma to be 4 / avg deg
+    gamma = 4 / avg_deg
+    K = 3
+    for G in (G_pred, subG):
+        for u, v in G.edges():
+            d = np.linalg.norm(G_pred.nodes[u]["coords"] - G_pred.nodes[v]["coords"])
+            psi = np.ones((K, K))
+            np.fill_diagonal(psi, np.exp(-gamma * d))
+            G[u][v]["psi"] = psi
 
     print("Running Loopy BP …")
-    _, preds, node2idx, idx2node = belief_propagation(
-        subG,
-        q=3,
-        seed=42,
-        init_beliefs="spectral",
-        message_init="random",
-        max_iter=5000,
-        damping=0.15,
-        balance_regularization=0.05,
-    )
+    # _, preds, node2idx, idx2node = belief_propagation(
+    #     subG,
+    #     q=2,
+    #     seed=42,
+    #     init_beliefs="spectral",
+    #     message_init="random",
+    #     max_iter=5000,
+    #     damping=0.15,
+    #     balance_regularization=0.05,
+    # )
 
-    true_labels = get_true_communities(G_true, node2idx=node2idx, attr="comm")
-    stats = detection_stats(preds, true_labels)
+    preds = duo_bp(subG, K=2, num_balls=32)
+    true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
+    stats = detection_stats(preds['communities'], true_labels)
     print("\n=== Community‑detection accuracy ===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")

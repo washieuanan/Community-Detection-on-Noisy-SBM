@@ -31,8 +31,8 @@ def generate_gbm(n: int,
     if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
         raise ValueError("Pick a and b s.t. sqrt(a) - sqrt(b) > 2 * sqrt(2)")
 
-    r_in = a * np.log(n) / n
-    r_out = b * np.log(n) / n
+    r_in = np.sqrt(a * np.log(n) / n)
+    r_out = np.sqrt(b * np.log(n) / n)
     p_in = a * np.log(n) / n
     p_out = b * np.log(n) / n
 
@@ -61,10 +61,10 @@ def generate_gbm(n: int,
             d = np.linalg.norm(pts[i] - pts[j]) 
             if comm[i] == comm[j]: 
                 if d < r_in and rng.random() < p_in: 
-                    G.add_edge(i,j) 
-                else: 
-                    if d < r_out and rng.random() < p_out: 
-                        G.add_edge(i,j) 
+                    G.add_edge(i,j, dist=d) 
+            else: 
+                if d < r_out and rng.random() < p_out: 
+                    G.add_edge(i,j, dist=d) 
     # discard_disconnected_nodes(G)
     return G
 
@@ -169,62 +169,76 @@ import numpy as np
 import networkx as nx
 
 def generate_gbm_poisson(
-    lam: float,      # intensity of Poisson PP on unit disk
-    K: int,          # number of communities
-    a: float,        # controls r_in, p_in
-    b: float,        # controls r_out, p_out
+    lam: float,          # scaling for the Poisson draw
+    n_target: int,       # desired (expected) number of vertices
+    K: int,              # number of communities
+    a: float,            # controls r_in, p_in
+    b: float,            # controls r_out, p_out
     dim: int = 2,
     seed: int | None = None
 ) -> nx.Graph:
     """
-    Geometric Block Model with node-locations drawn from 
-    a homogeneous Poisson point process (intensity=lam) on the unit disk.
-    
+    Geometric Block Model with vertices drawn from a homogeneous
+    Poisson point process on the unit disk.
+
     Parameters
     ----------
     lam : float
-        Intensity (points per unit area) of the Poisson PP on the unit disk.
+        Scaling factor: the vertex count is drawn from Poisson(lam * n_target).
+    n_target : int
+        Target (expected) number of vertices before the Poisson draw.
     K : int
         Number of communities.
     a, b : float
         Parameters controlling thresholds and probabilities:
-          r_in  = a * log(N) / N,    p_in  = a * log(N) / N
-          r_out = b * log(N) / N,    p_out = b * log(N) / N
-        Must satisfy sqrt(a) - sqrt(b) > 2*sqrt(2).
+            r_in  = a * log(N) / N,    p_in  = a * log(N) / N
+            r_out = b * log(N) / N,    p_out = b * log(N) / N
+        Must satisfy sqrt(a) - sqrt(b) > 2√2.
+    dim : int, default=2
+        Dimension of the ambient Euclidean space (only 2 is supported here).
     seed : int | None
         RNG seed for reproducibility.
+
+    Returns
+    -------
+    networkx.Graph
+        Undirected GBM graph with node attributes:
+            • coords : tuple[float, float]
+            • comm   : int  ∈ {0, …, K−1}
     """
-    if not np.sqrt(a) - np.sqrt(b) > 2*np.sqrt(2):
-        raise ValueError("Pick a and b such that sqrt(a) - sqrt(b) > 2*sqrt(2)")
-    
+    if np.sqrt(a) - np.sqrt(b) <= 2 * np.sqrt(2):
+        raise ValueError("Require sqrt(a) - sqrt(b) > 2*sqrt(2)")
+
     rng = np.random.default_rng(seed)
 
-    # 1) draw random number of points in unit disk
-    area = np.pi * 1**2
-    N = rng.poisson(lam * area)
+    # 1) sample number of vertices
+    N = rng.poisson(lam * n_target)
+    if N == 0:
+        raise RuntimeError("Poisson draw produced zero vertices; "
+                           "try a larger lam or n_target.")
 
-    # 2) sample N points uniformly in the disk via polar coords
-    r     = np.sqrt(rng.random(N))
-    theta = 2 * np.pi * rng.random(N)
+    # 2) sample N points uniformly in the unit disk
+    r     = np.sqrt(rng.random(N))            # radial component ∼ √U
+    theta = 2 * np.pi * rng.random(N)         # angle ∼ U[0, 2π)
     pts = np.column_stack((r * np.cos(theta), r * np.sin(theta)))
 
-    # community assignments
+    # 3) random community assignments
     comm = rng.integers(0, K, size=N)
 
-    # thresholds & probabilities
-    r_in  = a * np.log(N) / N
-    r_out = b * np.log(N) / N
+    # 4) thresholds & connection probabilities
+    r_in  = np.sqrt(a * np.log(N) / N)
+    r_out = np.sqrt(b * np.log(N) / N)
     p_in  = a * np.log(N) / N
     p_out = b * np.log(N) / N
 
-    # build graph
+    # 5) build graph
     G = nx.Graph()
     for i in range(N):
-        G.add_node(i, coords=(pts[i,0], pts[i,1]), comm=int(comm[i]))
+        G.add_node(i, coords=(pts[i, 0], pts[i, 1]), comm=int(comm[i]))
 
-    # add edges
+    # 6) add edges
     for i in range(N):
-        for j in range(i+1, N):
+        for j in range(i + 1, N):
             d = np.linalg.norm(pts[i] - pts[j])
             if comm[i] == comm[j]:
                 if d < r_in and rng.random() < p_in:

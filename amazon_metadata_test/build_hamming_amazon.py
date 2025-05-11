@@ -167,18 +167,27 @@ def build_category_graph(products,
 if __name__ == "__main__":
     import json
     import os
+    import random
     # Example usage
-    # products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
-    # G = build_category_graph(products, subsampled_classes=['DVD','Video'])
-    # for node in G.nodes():
-    #     if 'coords' in G.nodes[node]:
-    #         coords = G.nodes[node]['coords']
-    #         G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+    products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
+    G = build_category_graph(products, subsampled_classes=['Book','DVD'])
+    # Subsample: keep up to 20,000 nodes for each community
+    books_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 0]
+    music_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 1]
 
-    # nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_videoDVD.gml')
+    books_sample = set(random.sample(books_nodes, 20000)) if len(books_nodes) > 20000 else set(books_nodes)
+    music_sample = set(random.sample(music_nodes, 20000)) if len(music_nodes) > 20000 else set(music_nodes)
+
+    keep_nodes = books_sample.union(music_sample)
+    G = G.subgraph(keep_nodes).copy()
+    for node in G.nodes():
+        if 'coords' in G.nodes[node]:
+            coords = G.nodes[node]['coords']
+            G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+
+    nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_bookDVD.gml')
     # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
-    # print(G.nodes['0'])
+    
     # node_info = G.nodes['0']['coords']
-    # node_info = np.fromstring(node_info, sep=",")
-    # print(node_info)
+    # node_info = np.fromstring(node_info[1:-1], sep=",")
     # print(sum(node_info))

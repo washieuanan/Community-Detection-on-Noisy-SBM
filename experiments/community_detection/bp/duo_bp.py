@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.vectorized_bp import belief_propagation
+from community_detection.bp.vectorized_bp import belief_propagation
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
+from community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 
 # def belief_propagation(
@@ -88,44 +88,44 @@ from copy import deepcopy
 #     preds = beliefs.argmax(1)
 #     return beliefs, preds, node2idx, idx2node
 
-def weighted_percentile(data, percentile, weights=None):
-    """
-    Compute the weighted percentile of a dataset.
+# def weighted_percentile(data, percentile, weights=None):
+#     """
+#     Compute the weighted percentile of a dataset.
     
-    Parameters
-    ----------
-    data : array-like
-        The data to compute percentile on.
-    percentile : float
-        The percentile to compute (between 0 and 100).
-    weights : array-like, optional
-        The weights for each data point. If None, uniform weights are used.
+#     Parameters
+#     ----------
+#     data : array-like
+#         The data to compute percentile on.
+#     percentile : float
+#         The percentile to compute (between 0 and 100).
+#     weights : array-like, optional
+#         The weights for each data point. If None, uniform weights are used.
         
-    Returns
-    -------
-    float
-        The weighted percentile value.
-    """
-    if weights is None:
-        return np.percentile(data, percentile)
+#     Returns
+#     -------
+#     float
+#         The weighted percentile value.
+#     """
+#     if weights is None:
+#         return np.percentile(data, percentile)
         
-    # Convert to numpy arrays if they aren't already
-    data = np.asarray(data)
-    weights = np.asarray(weights)
+#     # Convert to numpy arrays if they aren't already
+#     data = np.asarray(data)
+#     weights = np.asarray(weights)
     
-    # Sort data and weights together
-    sorted_idx = np.argsort(data)
-    sorted_data = data[sorted_idx]
-    sorted_weights = weights[sorted_idx]
+#     # Sort data and weights together
+#     sorted_idx = np.argsort(data)
+#     sorted_data = data[sorted_idx]
+#     sorted_weights = weights[sorted_idx]
     
-    # Calculate cumulative weights (normalized)
-    cumulative_weights = np.cumsum(sorted_weights)
-    if cumulative_weights[-1] <= 0:
-        return np.nan
-    cumulative_weights = cumulative_weights / cumulative_weights[-1]
+#     # Calculate cumulative weights (normalized)
+#     cumulative_weights = np.cumsum(sorted_weights)
+#     if cumulative_weights[-1] <= 0:
+#         return np.nan
+#     cumulative_weights = cumulative_weights / cumulative_weights[-1]
     
-    # Interpolate to find the percentile
-    return np.interp(percentile/100, cumulative_weights, sorted_data)
+#     # Interpolate to find the percentile
+#     return np.interp(percentile/100, cumulative_weights, sorted_data)
 
 
 def create_dist_observed_subgraph(num_coords, observations):
@@ -221,132 +221,132 @@ def duo_bp(
     K              : int,
     num_balls      : int = 16,
     *,
-    # ---------------- algorithmic knobs ----------------
+    # ------- EM knobs -------
     max_em_iters         : int   = 50,
-    anneal_steps         : int   = 6,     # how many EM rounds to ramp-up λ
-    warmup_rounds        : int   = 2,     # pure “E” rounds (no pruning)
-    comm_cut             : float = 0.90,  # percentile threshold
-    geo_cut              : float = 0.90,
-    shrink_comm          : float = 1.00,
-    shrink_geo           : float = 0.80,
-    w_min                : float = 5e-2,
-    # ---------------- BP control -----------------------
-    max_iter_bp          : int   = 1_000,
+    anneal_steps         : int   = 6,
+    warmup_rounds        : int   = 2,
+    shrink_comm          : float = 0.90,   # 1.00 → keep, <1 → shrink
+    shrink_geo           : float = 0.85,
+    w_floor              : float = 1e-2,   # never go below this weight
+    forget               : bool  = False,  # if True re-start from pristine
+    # ------- BP control ----
+    max_iter_bp          : int   = 1000,
     damp_high            : float = 0.50,
     damp_low             : float = 0.25,
     balance_regularization : float = 0.20,
-    # ---------------- misc -----------------------------
+    # ------- misc ----------
     tol                  : float = 1e-4,
     patience             : int   = 7,
     bp_kwargs            : Dict | None = None,
     seed                 : int   = 0,
 ):
     """
-    EM-like alternating refinement with a gentle start and annealed updates.
-    Returns
-    -------
-    dict with keys  beliefs, communities, balls, history, node2idx, idx2node
+    Conservative variant of duo_bp:
+      • never deletes an edge (only rescales)
+      • keeps track of pristine weights (optional 'forget' reset)
+      • linear annealing of scale factors up to shrink_comm/geo
     """
-    ############ BP default kwargs ################################################
+    rng        = np.random.default_rng(seed)
+    subG       = deepcopy(G_obs)
+    pristine_w = {(u, v): d.get("weight", 1.0) for u, v, d in subG.edges(data=True)}
+
+    # ------- BP kwargs defaults -----------
     bp_kwargs = dict(bp_kwargs or {})
     bp_kwargs.setdefault("seed", seed)
     bp_kwargs.setdefault("init", "spectral")
     bp_kwargs.setdefault("max_iter", max_iter_bp)
     bp_kwargs.setdefault("balance_regularization", balance_regularization)
+    bp_kwargs.pop("damping", None)        # we control it
 
-    # we change damping inside the loop
-    bp_kwargs.pop("damping", None)
-
-    ############ helpers ##########################################################
-    def _current_lambda(step, base, ramp):
-        """Linear ramp-up   0 → base   over 'ramp' steps."""
-        if step <= ramp:
-            return base * step / ramp
-        return base
-
-    ############ main loop ########################################################
+    # ------- bookkeeping ------------------
     best   = {"obj": -np.inf}
     hist   : list[dict] = []
-    subG   = deepcopy(G_obs)
     no_imp = 0
 
+    # ------- pre-compute helpers -----------
+    edges_all = np.asarray(subG.edges(), dtype=object)
+    node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
+    iu_glob, iv_glob = _to_idx(edges_all, node2idx_global)
+
+    # main EM loop ----------------------------------------------------------
     for em in range(1, max_em_iters + 1):
-        # ------------------------------------------------ adaptive BP damping ---
-        frac = min(1., em / max_em_iters)
+
+        # -- optionally re-start weights (“forget”) --------------------------
+        if forget and em > 1:
+            for (u, v) in subG.edges():
+                subG[u][v]["weight"] = pristine_w[(u, v)]
+
+        # -- adaptive damping for BP ----------------------------------------
+        frac = em / max_em_iters
         bp_kwargs["damping"] = damp_high - frac * (damp_high - damp_low)
 
-        # -------------------- Community belief propagation ----------------------
+        # ======== COMMUNITY step (BP, q=K) ================================
         bel_c, _, n2i_c, _ = belief_propagation(
             subG, q=K, **bp_kwargs
         )
-        edges      = np.asarray(subG.edges(), dtype=object)
-        iu_c, iv_c = _to_idx(edges, n2i_c)
-        p_same     = _edge_same_prob(bel_c, iu_c, iv_c)
+        p_same = _edge_same_prob(bel_c, iu_glob, iv_glob)
 
-        # percentile mask (more conservative)
-        thresh_comm = np.percentile(p_same, comm_cut * 100)
-        mask_comm   = p_same > thresh_comm
+        # soft scale factor for community information
+        λ_c   = min(shrink_comm,
+                    (em - warmup_rounds) / max(1, anneal_steps))
+        λ_c   = max(0.0, λ_c)        # during warm-up λ→0
 
-        # -------------------- Geometry (“balls”) --------------------------------
+        # ======== GEOMETRIC step (BP, q=num_balls) ========================
         bel_g, _, n2i_g, _ = belief_propagation(
             subG, q=num_balls, **bp_kwargs
         )
-        lbls_g  = bel_g.argmax(1)
-        iu_g, iv_g = _to_idx(edges, n2i_g)
-        same_ball  = lbls_g[iu_g] == lbls_g[iv_g]
+        lbls_g   = bel_g.argmax(1)
+        conf_g   = 0.5 * (bel_g[iu_glob, lbls_g[iu_glob]]
+                        +  bel_g[iv_glob, lbls_g[iv_glob]])
 
-        thresh_geo = np.percentile(
-            0.5 * (bel_g[iu_g, lbls_g[iu_g]] + bel_g[iv_g, lbls_g[iv_g]]),
-            geo_cut * 100,
-        )
-        mask_geo = same_ball & (
-            0.5 * (bel_g[iu_g, lbls_g[iu_g]] + bel_g[iv_g, lbls_g[iv_g]]) > thresh_geo
-        )
+        same_ball = lbls_g[iu_glob] == lbls_g[iv_glob]
 
-        # ------------ shrink / prune      (skip in warm-up rounds) --------------
-        λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
-        λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
+        λ_g   = min(shrink_geo,
+                    (em - warmup_rounds) / max(1, anneal_steps))
+        λ_g   = max(0.0, λ_g)
 
-        n_drop_comm = n_drop_geo = 0
-        if em > warmup_rounds:
-            n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
-            n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo), λ_geo , w_min)
+        # ======== RE-WEIGHT edges (never drop) ============================
+        for (u, v), psame, sb, cg in zip(edges_all, p_same, same_ball, conf_g):
+            w0 = subG[u][v].get("weight", 1.0)
+            w_new = w0
+            # community shrink
+            if psame > np.percentile(p_same, 90):
+                w_new *= 1.0 - λ_c * (1.0 - psame)
+            # geometry shrink (opposite effect: penalise edges inside big balls)
+            if sb and cg > np.percentile(conf_g, 90):
+                w_new *= 1.0 - λ_g * cg
+            # floor safeguard
+            subG[u][v]["weight"] = max(w_new, w_floor)
 
-        # ---------------------- objective & bookkeeping -------------------------
+        # ======== OBJECTIVE + early stopping ==============================
         obj = float(np.max(bel_c, axis=1).sum())
-        hist.append(dict(
-            iter=em, obj=obj, edges=subG.number_of_edges(),
-            drop_comm=n_drop_comm, drop_geo=n_drop_geo,
-            damping=bp_kwargs["damping"], λ_comm=λ_comm, λ_geo=λ_geo
-        ))
+        hist.append(dict(iter=em, obj=obj,
+                         λ_c=λ_c, λ_g=λ_g,
+                         damping=bp_kwargs["damping"]))
 
-        # -------------------- early stopping / best save ------------------------
         if obj > best["obj"]:
-            best.update(obj=obj, beliefs=bel_c, balls=lbls_g, node2idx=n2i_c)
+            best.update(obj=obj, beliefs=bel_c,
+                        balls=lbls_g, node2idx=node2idx_global)
             no_imp = 0
         else:
             no_imp += 1
 
         if no_imp >= patience:
-            print(f"[EM] patience reached ({patience}) at iter {em}")
+            print(f"[safe-duoBP] patience {patience} reached at iter {em}")
             break
 
         if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
-            print(f"[EM] converged at iter {em}")
-            break
-
-        if subG.number_of_edges() == 0:
-            print("[EM] graph emptied – stop")
+            print(f"[safe-duoBP] converged at iter {em}")
             break
 
     hard = best["beliefs"].argmax(1)
     return dict(
-        beliefs=best["beliefs"],
-        communities=hard,
-        balls=best["balls"],
-        node2idx=best["node2idx"],
-        idx2node={i: u for u, i in best["node2idx"].items()},
-        history=hist,
+        beliefs     = best["beliefs"],
+        communities = hard,
+        balls       = best["balls"],
+        node2idx    = best["node2idx"],
+        idx2node    = {i: u for u, i in best["node2idx"].items()},
+        history     = hist,
     )
 
 
@@ -390,36 +390,36 @@ if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 240
-    b = 50
-    n = 40000
+    a = 125
+    b = 10
+    n = 800
     K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     G_true = generate_gbm(n=n, K=K, a=a, b=b, seed=42)
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
-    for u, v in G_true.edges():
-        G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
+    # for u, v in G_true.edges():
+    #     G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = original_density
+    C = 0.05 * original_density
     # print("C:", C)
-    # def weight_func(c1, c2):
-    #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-    #     return 1.0
+    def weight_func(c1, c2):
+        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+        return 1.0
 
-    # num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    # sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # observations = sampler.observe()
+    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    observations = sampler.observe()
 
-    # obs_nodes: Set[int] = set()
-    # for p, d in observations:
-    #     obs_nodes.add(p[0])
-    #     obs_nodes.add(p[1])
+    obs_nodes: Set[int] = set()
+    for p, d in observations:
+        obs_nodes.add(p[0])
+        obs_nodes.add(p[1])
 
-    # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
+    subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
     # print("Running Loopy BP …")
     # beliefs, preds, node2idx, idx2node = belief_propagation(
     #     subG,
@@ -466,11 +466,27 @@ if __name__ == "__main__":
     #     K=K,
     #     num_balls=32,
     # )
-    res = duo_bp(
-        G_true,
-        K=K,
-        num_balls=32
+    bel_c, preds, n2i, idx2n = belief_propagation(
+        subG,
+        q=K,
+        seed=42,
+        init="spectral",
+        msg_init="random",
+        damping=0.15,
+        min_steps = 50,
+        balance_regularization=0.05,
     )
+    res = {
+        "beliefs": bel_c,
+        "communities": preds,
+        "node2idx": n2i,
+        "idx2node": idx2n,
+    }
+    # res = duo_bp(
+    #     G_true,
+    #     K=K,
+    #     num_balls=32
+    # )
     preds = res["communities"]
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)

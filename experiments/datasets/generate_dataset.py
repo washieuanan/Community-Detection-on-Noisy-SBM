@@ -45,6 +45,7 @@ def sample_parameter(n_range, K_list,  a_range, b_range):
     n = int(np.random.choice(n_range))
     K = int(np.random.choice(K_list))
     a = int(np.random.choice(a_range))
+
     # ensure b < a
     b_candidates = [bb for bb in b_range if bb < a]
     b = int(np.random.choice(b_candidates)) if b_candidates else int(a // 2)
@@ -59,12 +60,12 @@ def generate_dataset(output_dir: str,
                      b_range=None):
     n_range   = n_range   or range(100, 1000, 50)
     K_list    = K_list    or [2]
-    a_range   = a_range   or range(50, 501, 50)
-    b_range   = b_range   or range(10, 301, 10)
+    a_range   = a_range   or range(15, 200, 10)
+    b_range   = b_range   or range(1, 100, 10)
     os.makedirs(output_dir, exist_ok=True)
 
     # Define sparsities; ensure 0.05 is first / max
-    sparsities = [0.05, 0.01, 0.005, 0.0025, 0.001]
+    sparsities = [0.1, 0.05, 0.01, 0.005, 0.0025, 0.001]
 
     count = 0
     seed  = 0
@@ -97,7 +98,7 @@ def generate_dataset(output_dir: str,
                                             seed=seed).observe()
 
         # now downsample for lower sparsities
-        observations_data = { }
+        observations_data = {}
         observations_data[max_s] = obs_full
 
         for s in sparsities[1:]:
@@ -112,7 +113,7 @@ def generate_dataset(output_dir: str,
         # write out
         record = {
             'parameters': {
-                'n': n, 'K': K, 'a': a, 'b': b,
+                'n': n, 'K': K, 'a': a, 'b': b, 'density': orig_density,
                 'epsilon_threshold': epsilon_threshold,
                 'seed': seed
             },
@@ -128,4 +129,4 @@ def generate_dataset(output_dir: str,
         seed  += 1
 
 if __name__ == "__main__":
-    generate_dataset("datasets/fixed_gbm_w_observations", num_graphs=500)
+    generate_dataset("datasets/fixed_gbm_code", num_graphs=500)
