@@ -27,7 +27,8 @@ from copy import deepcopy
 from typing import Hashable, Iterable
 from numpy.random import default_rng
 from experiments.community_detection.bp.duo_bp import duo_bp
-
+from sklearn.neighbors import KernelDensity
+from scipy.linalg import eigh
 # censoring schemes
 # ---------------------------------------------------------------------
 # 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
@@ -579,196 +580,289 @@ def get_callable(calls: Union[Tuple, str]):
             return (func_dict[calls[0]], func_dict[calls[0]])
         else:
             raise ValueError("Invalid callable input")
+
+
 # ---------------------------------------------------------------------------
-# EM driver  – spectral dual
+# helpers --------------------------------------------------------------------
+def _to_idx(edge_arr, n2i):
+    iu = np.fromiter((n2i[u] for u, _ in edge_arr), int, len(edge_arr))
+    iv = np.fromiter((n2i[v] for _, v in edge_arr), int, len(edge_arr))
+    return iu, iv
+
+
+def _edge_same_prob(Q, iu, iv):
+    """probability that two endpoints share the same label under Q."""
+    return (Q[iu] * Q[iv]).sum(1)
+
+
+def _scale_edges(G, mask, conf, lam, w_min, w_cap, mode="shrink"):
+    """Scale selected edges up/down.
+
+    Parameters
+    ----------
+    mask : bool array over `edges`
+    conf : confidence values (same shape)
+    lam  : scalar 0–1 shrink / boost magnitude
+    mode : "shrink" | "boost"
+    """
+    cnt = 0
+    for (flag, (u, v), c) in zip(mask, G.edges(), conf):
+        if not flag:
+            continue
+        w = G[u][v]["weight"]
+        if mode == "shrink":
+            new_w = max(w_min, w * (1.0 - lam))
+        else:                                   # boost
+            fac   = 1.0 + lam * c              # confidence-adaptive
+            new_w = min(w_cap, w * fac)
+        if abs(new_w - w) > 1e-12:
+            G[u][v]["weight"] = new_w
+            cnt += 1
+    return cnt
+
+
 # ---------------------------------------------------------------------------
-# def duo_spec(
-#     H_obs            : nx.Graph,
-#     K                : int,
-#     num_balls        : int = 16,
-#     config           : tuple = ('bethe_hessian', 'bethe_hessian'),
-#     max_em_iters     : int   = 50,
-#     anneal_steps     : int   = 6,
-#     warmup_rounds    : int   = 2,
-#     comm_cut         : float = 0.90,
-#     geo_cut          : float = 0.90,
-#     shrink_comm      : float = 1.00,
-#     shrink_geo       : float = 0.80,
-#     w_min            : float = 5e-2,
-#     tol              : float = 1e-4,
-#     patience         : int   = 7,
-#     random_state     : int   = 0,
-# ):
-#     """
-#     Alternating EM-like refinement driven by the new confidence definition.
-#     """
-#     rng             = np.random.default_rng(random_state)
-#     subG            = deepcopy(H_obs)
-#     edges           = np.asarray(subG.edges(), dtype=object)
-#     node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
-#     iu_global, iv_global = _to_idx(edges, node2idx_global)
-
-#     best, hist = {"obj": -np.inf}, []
-#     no_imp     = 0
-#     config = get_callable(config)
-#     def _current_lambda(step, base, ramp):
-#         if step <= 0:
-#             return 0.0
-#         if step >= ramp:
-#             return base
-#         return base * step / ramp
-
-#     # --------------------------- EM loop -------------------------------------
-#     for em in range(1, max_em_iters + 1):
-
-#         # ------------------------ community step ------------------------------
-#         Q_comm, hard_comm, *_ = config[0](
-#             subG, q=K, random_state=random_state
-#         )
-#         p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
-#         mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
-
-#         # ------------------------ geometry step -------------------------------
-#         Q_geo, hard_geo, *_ = config[1](
-#             subG, q=num_balls, random_state=random_state
-#         )
-#         same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
-#         conf_g     = 0.5 * (Q_geo[iu_global, hard_geo[iu_global]] +
-#                             Q_geo[iv_global, hard_geo[iv_global]])
-#         mask_geo = same_ball & (
-#             conf_g > np.percentile(conf_g, geo_cut * 100)
-#         )
-
-#         # ------------------------ shrink / prune ------------------------------
-#         λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
-#         λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
-
-#         n_drop_comm = n_drop_geo = 0
-#         if em > warmup_rounds:
-#             n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
-#             n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo),
-#                                           λ_geo , w_min)
-
-#         # ------------------------ objective & logging -------------------------
-#         obj = float(np.max(Q_comm, axis=1).sum())   # higher is better
-#         hist.append(dict(
-#             iter=em, obj=obj, edges=subG.number_of_edges(),
-#             drop_comm=n_drop_comm, drop_geo=n_drop_geo,
-#             λ_comm=λ_comm, λ_geo=λ_geo,
-#         ))
-
-#         if obj > best["obj"]:
-#             best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
-#                         node2idx=node2idx_global)
-#             no_imp = 0
-#         else:
-#             no_imp += 1
-
-#         if no_imp >= patience:
-#             print(f"[EM] patience reached ({patience}) at iter {em}")
-#             break
-#         if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
-#             print(f"[EM] converged at iter {em}")
-#             break
-#         if subG.number_of_edges() == 0:
-#             print("[EM] graph emptied – stop")
-#             break
-
-#     hard_final = best["beliefs"].argmax(1)
-#     return dict(
-#         beliefs     = best["beliefs"],
-#         communities = hard_final,
-#         balls       = best["balls"],
-#         node2idx    = best["node2idx"],
-#         idx2node    = {i: u for u, i in best["node2idx"].items()},
-#         history     = hist,
-#     )
-# ----------------------------------------------------------- safe EM driver
+# main -----------------------------------------------------------------------
 def duo_spec(
-    H_obs           : nx.Graph,
-    K               : int,
+    H_obs: nx.Graph,
+    K: int,
+    num_balls: int = 16,
+    config: tuple = ("bethe_hessian", "bethe_hessian"),
     *,
-    num_patches     : int   = 20,
-    shrink_max      : float = 0.60,      # only scale
-    hub_keep        : int   = 20,        # protect H hub nodes
-    gamma_max       : float = 2.0,       # final geometry penalty
-    warmup_rounds   : int   = 3,
-    ramp_rounds     : int   = 8,
-    max_iter        : int   = 35,
-    tol_obj         : float = 1e-4,
-    patience        : int   = 7,
-    random_state    : int   = 0,
+    # EM
+    max_em_iters=50,
+    anneal_steps=6,
+    warmup_rounds=2,
+    # percentile cuts
+    comm_cut=0.90,
+    geo_cut=0.90,
+    # shrink / boost strength
+    shrink_comm=1.00,
+    shrink_geo=0.80,
+    boost_comm=0.60,
+    boost_geo=0.40,
+    boost_cut_comm=0.97,
+    boost_cut_geo=0.97,
+    # weight bounds
+    w_min=5e-2,
+    w_cap=4.0,
+    # misc
+    tol=1e-4,
+    patience=7,
+    random_state=0,
 ):
-    """Edge **re-weight** (no deletion) EM with hub protection + γ schedule."""
-    rng  = np.random.default_rng(random_state)
-    G    = deepcopy(H_obs)
+    """Pure-spectral EM with both up- and down-weighting of edges."""
+    rng = np.random.default_rng(random_state)
+    subG = deepcopy(H_obs)
+    for _, _, d in subG.edges(data=True):
+        d.setdefault("weight", 1.0)
 
-    # ----- helpers -----------------------------------------------------------
-    nodes        = list(G.nodes())
-    node2idx     = {u: i for i, u in enumerate(nodes)}
-    edges_arr    = np.asarray(G.edges(), dtype=object)
-    iu, iv       = _to_idx(edges_arr, node2idx)
-    w_orig       = np.fromiter((G[u][v].get("weight", 1.0)
-                                for u, v in edges_arr), float, len(edges_arr))
-
-    # hub list to freeze
-    degs   = np.array([G.degree(u) for u in nodes])
-    hubs   = set(np.argsort(degs)[-hub_keep:])
+    edges = np.asarray(subG.edges(), dtype=object)
+    node2idx = {u: i for i, u in enumerate(subG.nodes())}
+    iu_glob, iv_glob = _to_idx(edges, node2idx)
 
     best, hist, no_imp = {"obj": -np.inf}, [], 0
-    for it in range(1, max_iter + 1):
+    config = get_callable(config)
 
-        # -- embeddings ------------------------------------------------------
-        Qc, *_ = bethe_hessian(G, q=K, random_state=random_state)
-        p_c    = _edge_same_prob(Qc, iu, iv)
+    def _lam(step, base):            # linear ramp-up after warm-up
+        d = step - warmup_rounds
+        if d <= 0:  return 0.0
+        return base if d >= anneal_steps else base * d / anneal_steps
 
-        Qg, *_ = regularized_laplacian(G, q=num_patches,
-                                       random_state=random_state)
-        p_g    = _edge_same_prob(Qg, iu, iv)
+    # -----------------------------------------------------------------------
+    for em in range(1, max_em_iters + 1):
+        # ---------------- community embedding -----------------------------
+        Q_comm, hard_comm, *_ = config[0](
+            subG, q=K, random_state=random_state
+        )
+        p_same = _edge_same_prob(Q_comm, iu_glob, iv_glob)
+        mask_comm_shrink = p_same > np.percentile(p_same, comm_cut * 100)
+        mask_comm_boost  = p_same > np.percentile(p_same, boost_cut_comm * 100)
 
-        # ----- Bethe eigen-gap health check ---------------------------------
-        vals, _ = np.linalg.eigh(nx.normalized_laplacian_matrix(G).toarray())
-        gap_ok  = (vals[1] - vals[0]) > 0.01          # heuristic
-        γ       = gamma_max if gap_ok else 1.0 + (gamma_max-1.0)*0.5
+        # ---------------- geometry embedding ------------------------------
+        Q_geo, hard_geo, *_ = config[1](
+            subG, q=num_balls, random_state=random_state
+        )
+        same_ball = hard_geo[iu_glob] == hard_geo[iv_glob]
+        conf_g = 0.5 * (Q_geo[iu_glob, hard_geo[iu_glob]] +
+                        Q_geo[iv_glob, hard_geo[iv_glob]])
+        mask_geo_shrink = same_ball & (
+            conf_g > np.percentile(conf_g, geo_cut * 100)
+        )
+        mask_geo_boost = same_ball & (
+            conf_g > np.percentile(conf_g, boost_cut_geo * 100)
+        )
 
-        # ----- schedules ----------------------------------------------------
-        if it <= warmup_rounds:
-            lam = 0.0
-        else:
-            lam = shrink_max * min(1.0,
-                     (it - warmup_rounds) / float(ramp_rounds))
+        # ---------------- edge re-weighting  ------------------------------
+        λc, λg = _lam(em, shrink_comm), _lam(em, shrink_geo)
+        λcB, λgB = _lam(em, boost_comm), _lam(em, boost_geo)
 
-        # ----- re-weight ----------------------------------------------------
-        for (u, v), pc, pg in zip(edges_arr, p_c, p_g):
-            s = (pc - 0.5) - γ * (pg - 0.5)
-            w = G[u][v].get("weight", 1.0)
-            # freeze edges touching hubs
-            if node2idx[u] in hubs or node2idx[v] in hubs:
-                continue
-            # rescale **down** only if s<0
-            if s < 0.0:
-                G[u][v]["weight"] = w * (1.0 - lam * (-s))
+        drop_c = _scale_edges(subG, mask_comm_shrink, p_same, λc,
+                              w_min, w_cap, "shrink")
+        drop_g = _scale_edges(subG, mask_geo_shrink,  conf_g, λg,
+                              w_min, w_cap, "shrink")
+        boost_c = _scale_edges(subG, mask_comm_boost, p_same, λcB,
+                               w_min, w_cap, "boost")
+        boost_g = _scale_edges(subG, mask_geo_boost,  conf_g, λgB,
+                               w_min, w_cap, "boost")
 
-        # ----- objective ----------------------------------------------------
-        obj = float(np.max(Qc, axis=1).sum())
-        hist.append(dict(iter=it, obj=obj, lam=lam, γ=γ))
+        # ---------------- objective & bookkeeping -------------------------
+        obj = float(np.max(Q_comm, axis=1).sum())
+        hist.append(dict(it=em, obj=obj, edges=subG.number_of_edges(),
+                         shrink_comm=drop_c, shrink_geo=drop_g,
+                         boost_comm=boost_c,  boost_geo=boost_g))
 
-        if obj > best["obj"] + tol_obj * len(nodes):
-            best.update(obj=obj, beliefs=Qc, node2idx=node2idx)
+        if obj > best["obj"]:
+            best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
+                        node2idx=node2idx)
             no_imp = 0
         else:
             no_imp += 1
 
+        # early-stop conditions
         if no_imp >= patience:
+            print(f"[EM] patience reached ({patience}) at iter {em}")
+            break
+        if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
+            print(f"[EM] converged at iter {em}")
+            break
+        if subG.number_of_edges() == 0:
+            print("[EM] graph emptied – stop")
+            break
+
+    hard_final = best["beliefs"].argmax(1)
+    return dict(
+        beliefs=best["beliefs"],
+        communities=hard_final,
+        balls=best["balls"],
+        node2idx=best["node2idx"],
+        idx2node={i: u for u, i in best["node2idx"].items()},
+        history=hist,
+        G_final=subG,
+    )
+# ----------------------------------------------------------- safe EM driver
+def duo_bprop(
+    G_obs              : nx.Graph,
+    K                  : int,
+    *,
+    # ---------------- algorithmic knobs ------------------------------
+    max_em_iters     = 50,
+    anneal_steps     = 8,
+    warmup_rounds    = 2,
+    # cut-offs
+    boost_cut        = 0.97,
+    add_cut          = 0.995,
+    geo_cut          = 0.90,
+    # magnitudes
+    boost_lambda0    = 0.30,
+    shrink_geo       = 0.80,
+    boost_cap        = 3.0,
+    w_add            = 0.5,
+    max_virtual      = 3,
+    w_min            = 5e-2,
+    # BP, misc ...
+    **kwargs,
+):
+    """
+    Safe EM-style refinement that *only* re-scales up/down existing edges
+    and (optionally) adds lightweight virtual edges between highly probable
+    same-community pairs.
+    """
+    rng   = np.random.default_rng(kwargs.get("seed", 0))
+    G     = deepcopy(G_obs)
+
+    # --- keep original weights for later restoration -----------------
+    for u, v, d in G.edges(data=True):
+        d.setdefault("weight", 1.0)
+        d["w_orig"]  = d["weight"]
+        d["w_extra"] = 0.0           # up-weights + virtual edges live here
+
+    hist, best, no_imp = [], {"obj":-np.inf}, 0
+
+    for em in range(1, max_em_iters+1):
+        # ---------------- BP for communities -------------------------
+        bel_c, _, n2i, _ = belief_propagation(G, q=K, **kwargs)
+        edges   = np.asarray(G.edges(), dtype=object)
+        iu, iv  = _to_idx(edges, n2i)
+        p_same  = _edge_same_prob(bel_c, iu, iv)
+
+        # percentile thresholds
+        th_boost = np.percentile(p_same, boost_cut*100)
+        mask_boost = p_same > th_boost                 # existing edges
+        # ------------------------------------------------------------- Boost
+        λ = min(boost_lambda0 * em / max(1, anneal_steps), boost_lambda0)
+        for flag, (u, v) in zip(mask_boost, edges):
+            if not flag:
+                continue
+            data = G.edges[u, v]
+            factor = 1 + λ
+            factor = min(factor, boost_cap)
+            data["w_extra"] = (factor-1)*data["w_orig"]
+
+        # ---------------- Geometry step  (soft down-weight) ----------
+        bel_g, _, n2i_g, _ = belief_propagation(G, q=min(16, K*2), **kwargs)
+        lbls_g = bel_g.argmax(1)
+        iu_g, iv_g = _to_idx(edges, n2i_g)
+        same_ball  = lbls_g[iu_g] == lbls_g[iv_g]
+        th_geo     = np.percentile(
+            0.5*(bel_g[iu_g,lbls_g[iu_g]]+bel_g[iv_g,lbls_g[iv_g]]),
+            geo_cut*100,
+        )
+        mask_geo = same_ball & (
+            0.5*(bel_g[iu_g,lbls_g[iu_g]]+bel_g[iv_g,lbls_g[iv_g]]) > th_geo
+        )
+
+        λ_geo = shrink_geo
+        for flag, (u, v) in zip(mask_geo, edges):
+            if not flag:
+                continue
+            data = G.edges[u, v]
+            data["w_extra"]-= λ_geo*data["w_orig"]      # soft shrink
+            # clip
+            if data["w_orig"]+data["w_extra"] < w_min:
+                data["w_extra"] = w_min-data["w_orig"]
+
+        # ------------------- Add virtual edges -----------------------
+        # sample up to max_virtual per node among absent pairs
+        th_add = np.percentile(p_same, add_cut*100)
+        # rank candidate non-edges
+        cand_idx = np.where(p_same > th_add)[0]
+        rng.shuffle(cand_idx)
+        added = 0
+        per_node = {u:0 for u in G}
+        for idx in cand_idx:
+            u, v = edges[idx]
+            if G.has_edge(u, v):          # only absent edges
+                continue
+            if per_node[u] >= max_virtual or per_node[v] >= max_virtual:
+                continue
+            G.add_edge(u, v,
+                       weight = w_add,
+                       w_orig = 0.0,
+                       w_extra= w_add)
+            per_node[u]+=1; per_node[v]+=1
+            added += 1
+
+        # ------------------ objective & bookkeeping ------------------
+        obj = float(np.max(bel_c, axis=1).sum())
+        hist.append(dict(it=em, obj=obj, added=added))
+
+        if obj > best["obj"]:
+            best.update(obj=obj, beliefs=bel_c, node2idx=n2i)
+            no_imp = 0
+        else:
+            no_imp += 1
+        if no_imp >= 7:
             break
 
     hard = best["beliefs"].argmax(1)
     return dict(
-        beliefs     = best["beliefs"],
-        communities = hard,
-        node2idx    = best["node2idx"],
-        idx2node    = {i: u for u, i in best["node2idx"].items()},
-        history     = hist,
+        beliefs=best["beliefs"],
+        communities=hard,
+        node2idx=best["node2idx"],
+        idx2node={i:u for u,i in best["node2idx"].items()},
+        history=hist,
+        G_final=G,                 # in case one wants to inspect weights
     )
 
 
@@ -827,23 +921,23 @@ if __name__ == "__main__":
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    # C = 0.50 * original_density
-    # # print("C:", C)
-    # def weight_func(c1, c2):
-    #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-    #     return 1.0
+    C = 0.8 * original_density
+    # print("C:", C)
+    def weight_func(c1, c2):
+        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+        return 1.0
 
-    # num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    # sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # observations = sampler.observe()
+    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
+    observations = sampler.observe()
 
-    # obs_nodes: Set[int] = set()
-    # for p, d in observations:
-    #     obs_nodes.add(p[0])
-    #     obs_nodes.add(p[1])
+    obs_nodes: Set[int] = set()
+    for p, d in observations:
+        obs_nodes.add(p[0])
+        obs_nodes.add(p[1])
 
     # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
-    subG = erdos_renyi_mask(G_true, 0.05, seed=42)
+    subG = erdos_renyi_mask(G_true, 0.005, seed=42)
     # subG = geometric_censor(G_true, 0.3, coord_key="coords")
     # # print("Running Loopy BP …")
     # beliefs, preds, node2idx, idx2node = belief_propagation(
@@ -858,25 +952,15 @@ if __name__ == "__main__":
     # )
     
     res = duo_spec(
-        subG,
+        G_true,
         K=K,
     )
-    # _, labels, _, _ = gbm_em(
-    #     subG,
-    #     k=K,
-    #     dim=3,
-    #     epochs=100,
-    #     lr_x=0.05,
-    #     inner_grad_steps=500,
-    #     eps=1e-9
-    # )
+    preds = res["communities"]
+
     # labels = spectral_clustering(subG, q=K, seed=42)
     # preds = np.array([labels[i] for i in range(len(labels))])
-    # res = geo_spec_v4(
-    #     subG,
-    #     K=2,
-    # )
-    preds = res["communities"]
+
+
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)
     # sub_preds = np.array([preds[i] for i in obs_nodes])
