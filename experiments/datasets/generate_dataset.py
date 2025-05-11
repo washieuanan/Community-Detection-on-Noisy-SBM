@@ -60,12 +60,12 @@ def generate_dataset(output_dir: str,
                      b_range=None):
     n_range   = n_range   or range(100, 1000, 50)
     K_list    = K_list    or [2]
-    a_range   = a_range   or range(25, 300, 25)
-    b_range   = b_range   or range(5, 150, 10)
+    a_range   = a_range   or range(15, 200, 10)
+    b_range   = b_range   or range(1, 100, 10)
     os.makedirs(output_dir, exist_ok=True)
 
     # Define sparsities; ensure 0.05 is first / max
-    sparsities = [0.05, 0.01, 0.005, 0.0025, 0.001]
+    sparsities = [0.1, 0.05, 0.01, 0.005, 0.0025, 0.001]
 
     count = 0
     seed  = 0
@@ -129,4 +129,4 @@ def generate_dataset(output_dir: str,
         seed  += 1
 
 if __name__ == "__main__":
-    generate_dataset("datasets/GBM_W_OBS_DENSITY", num_graphs=500)
+    generate_dataset("datasets/fixed_gbm_code", num_graphs=500)

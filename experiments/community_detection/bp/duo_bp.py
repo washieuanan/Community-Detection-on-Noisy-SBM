@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.vectorized_bp import belief_propagation
+from community_detection.bp.vectorized_bp import belief_propagation
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
+from community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 
 # def belief_propagation(
@@ -88,44 +88,44 @@ from copy import deepcopy
 #     preds = beliefs.argmax(1)
 #     return beliefs, preds, node2idx, idx2node
 
-def weighted_percentile(data, percentile, weights=None):
-    """
-    Compute the weighted percentile of a dataset.
+# def weighted_percentile(data, percentile, weights=None):
+#     """
+#     Compute the weighted percentile of a dataset.
     
-    Parameters
-    ----------
-    data : array-like
-        The data to compute percentile on.
-    percentile : float
-        The percentile to compute (between 0 and 100).
-    weights : array-like, optional
-        The weights for each data point. If None, uniform weights are used.
+#     Parameters
+#     ----------
+#     data : array-like
+#         The data to compute percentile on.
+#     percentile : float
+#         The percentile to compute (between 0 and 100).
+#     weights : array-like, optional
+#         The weights for each data point. If None, uniform weights are used.
         
-    Returns
-    -------
-    float
-        The weighted percentile value.
-    """
-    if weights is None:
-        return np.percentile(data, percentile)
+#     Returns
+#     -------
+#     float
+#         The weighted percentile value.
+#     """
+#     if weights is None:
+#         return np.percentile(data, percentile)
         
-    # Convert to numpy arrays if they aren't already
-    data = np.asarray(data)
-    weights = np.asarray(weights)
+#     # Convert to numpy arrays if they aren't already
+#     data = np.asarray(data)
+#     weights = np.asarray(weights)
     
-    # Sort data and weights together
-    sorted_idx = np.argsort(data)
-    sorted_data = data[sorted_idx]
-    sorted_weights = weights[sorted_idx]
+#     # Sort data and weights together
+#     sorted_idx = np.argsort(data)
+#     sorted_data = data[sorted_idx]
+#     sorted_weights = weights[sorted_idx]
     
-    # Calculate cumulative weights (normalized)
-    cumulative_weights = np.cumsum(sorted_weights)
-    if cumulative_weights[-1] <= 0:
-        return np.nan
-    cumulative_weights = cumulative_weights / cumulative_weights[-1]
+#     # Calculate cumulative weights (normalized)
+#     cumulative_weights = np.cumsum(sorted_weights)
+#     if cumulative_weights[-1] <= 0:
+#         return np.nan
+#     cumulative_weights = cumulative_weights / cumulative_weights[-1]
     
-    # Interpolate to find the percentile
-    return np.interp(percentile/100, cumulative_weights, sorted_data)
+#     # Interpolate to find the percentile
+#     return np.interp(percentile/100, cumulative_weights, sorted_data)
 
 
 def create_dist_observed_subgraph(num_coords, observations):
@@ -387,32 +387,34 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
-    from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 240
-    b = 50
-    n = 40000
+    from graph_generation.gbm import generate_gbm_poisson, generate_gbm
+    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from community_detection.bp.vectorized_bp import beta_param
+    a = 150
+    b = 75
+    n = 750
     K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     G_true = generate_gbm(n=n, K=K, a=a, b=b, seed=42)
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
-    for u, v in G_true.edges():
-        G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
+    # for u, v in G_true.edges():
+    #     G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = original_density
+    C = 0.05 * original_density
     # print("C:", C)
-    # def weight_func(c1, c2):
-    #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-    #     return 1.0
+    def weight_func(c1, c2):
+        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
+        return 1.0
 
-    # num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    # sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    # observations = sampler.observe()
+    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
+    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=0)
+    observations = sampler.observe()
+
+    subG = create_dist_observed_subgraph(len(G_true.nodes()), observations)
 
     # obs_nodes: Set[int] = set()
     # for p, d in observations:
@@ -467,10 +469,22 @@ if __name__ == "__main__":
     #     num_balls=32,
     # )
     res = duo_bp(
-        G_true,
+        subG,
         K=K,
-        num_balls=32
+        num_balls=32,
+        seed=0, 
     )
+
+    # beliefs, preds, node2idx, idx2node = belief_propagation(
+    #     subG,
+    #     q=K,
+    #     seed=42,
+    #     init="random",
+    #     msg_init="random",
+    #     max_iter=100000,
+    #     damping=0.15,   
+    #     balance_regularization=0.05,
+    # )
     preds = res["communities"]
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)

@@ -75,7 +75,7 @@ class SpectralEmbeddingDetection(Detection):
         observations: List[Tuple[Any, Any]],
         k: int
     ):
-        super().__init__(graph, observations)
+        super().__init__(graph, observations, k = k)
         self.k = k
 
     def output(self) -> np.ndarray:

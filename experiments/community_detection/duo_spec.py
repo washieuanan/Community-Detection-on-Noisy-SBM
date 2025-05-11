@@ -1076,8 +1076,10 @@ if __name__ == "__main__":
     from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     from sklearn.manifold import MDS
     from sklearn.cluster import KMeans
-    a = 35
-    b = 8
+    from controls.spectral import spectral_clustering
+    from community_detection.bp.vectorized_bp import belief_propagation
+    a = 70
+    b = 16
     n = 150
     K = 2
     r_in = np.sqrt(a * np.log(n) / n)
@@ -1085,7 +1087,7 @@ if __name__ == "__main__":
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
     G_true = generate_gbm(
-        n=750,
+        n=n,
         K=K,
         a=a,
         b=b,
@@ -1097,7 +1099,7 @@ if __name__ == "__main__":
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.1 * original_density
+    C = 0.12 * original_density
     # print("C:", C)
     def weight_func(c1, c2):
         # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
@@ -1116,7 +1118,7 @@ if __name__ == "__main__":
     # add_gaussian_weights_from_dist(subG)
     # add_localscale_weights(subG, 2)
     # renormalise_for_sampling(subG, C)
-    add_jaccard_edges(subG, frac_keep=0.02)     #  ←  NEW
+    # add_jaccard_edges(subG, frac_keep=0.02)     #  ←  NEW
     # augment_knn_via_sp(subG, k=2)
     # labels = spectral_clustering(G_true, q=K, seed=42)
     # preds = np.array([labels[i] for i in range(len(labels))])
@@ -1167,52 +1169,61 @@ if __name__ == "__main__":
     #     num_balls=32,
     # )
 
-    build_pairwise_potentials(subG, a, b)
+    # build_pairwise_potentials(subG, a, b)
 
-    # --- 1) Build the same node2idx that duo_spec will use internally ----
-    nodes    = list(subG.nodes())               # networkx preserves insertion order
-    node2idx = { u:i for i,u in enumerate(nodes) }
-    n        = len(nodes)
+    # # --- 1) Build the same node2idx that duo_spec will use internally ----
+    # nodes    = list(subG.nodes())               # networkx preserves insertion order
+    # node2idx = { u:i for i,u in enumerate(nodes) }
+    # n        = len(nodes)
 
-    # --- 2) Run BP to get marginals bel[u] = [P(c_u=0), P(c_u=1)] --------
-    bel = loopy_bp(subG, max_iter=30)            # from the BP helper above
+    # # --- 2) Run BP to get marginals bel[u] = [P(c_u=0), P(c_u=1)] --------
+    # bel = loopy_bp(subG, max_iter=30)            # from the BP helper above
 
-    # --- 3) Fill init_beliefs using your precomputed node2idx ----------
-    K = 2
-    init_beliefs = np.zeros((n, K), float)
-    for u, bvec in bel.items():
-        init_beliefs[node2idx[u]] = bvec
-    result = duo_spec(
+    # # --- 3) Fill init_beliefs using your precomputed node2idx ----------
+    # K = 2
+    # init_beliefs = np.zeros((n, K), float)
+    # for u, bvec in bel.items():
+    #     init_beliefs[node2idx[u]] = bvec
+    # result = duo_spec(
+    #     subG,
+    #     K=K,
+    #     init_beliefs=init_beliefs,
+    #     num_balls=32,
+    #     config= ("score", "bethe_hessian"),
+    #     random_state=42
+    # )
+    # preds = result["communities"]
+    # hard     = result["communities"]     # list of length n
+    # idx2node = result["idx2node"]        # dict: index -> node_id
+
+    # # build original node->label map
+    # orig_labels = { node: hard[i] for i, node in idx2node.items() }
+
+    # # isolate core labels
+    # core_nodes  = set(nx.k_core(subG, k=2).nodes())
+    # core_labels = { u: orig_labels[u] for u in core_nodes }
+
+    # # run the periphery voting
+    # full_labels = two_core_periphery_vote(subG, core_labels, k=2)
+
+    # # fallback for any node never reached by BFS (e.g. isolated)
+    # for u in subG.nodes():
+    #     if u not in full_labels:
+    #         full_labels[u] = orig_labels[u]
+
+
+    # preds = spectral_clustering(subG, observations=observations, q=K)
+    _, preds, _, _ =  belief_propagation(
         subG,
-        K=K,
-        init_beliefs=init_beliefs,
-        num_balls=32,
-        config= ("score", "bethe_hessian"),
-        random_state=42
+        q=K,
+        max_iter=1000,
+        damping=0.4,
+        balance_regularization=0.2,
     )
-    preds = result["communities"]
-    hard     = result["communities"]     # list of length n
-    idx2node = result["idx2node"]        # dict: index -> node_id
-
-    # build original node->label map
-    orig_labels = { node: hard[i] for i, node in idx2node.items() }
-
-    # isolate core labels
-    core_nodes  = set(nx.k_core(subG, k=2).nodes())
-    core_labels = { u: orig_labels[u] for u in core_nodes }
-
-    # run the periphery voting
-    full_labels = two_core_periphery_vote(subG, core_labels, k=2)
-
-    # fallback for any node never reached by BFS (e.g. isolated)
-    for u in subG.nodes():
-        if u not in full_labels:
-            full_labels[u] = orig_labels[u]
-
-    # rebuild the final hard assignment array in index order
-    hard_refined = np.array([ full_labels[idx2node[i]] for i in range(len(hard)) ])
+    # # rebuild the final hard assignment array in index order
+    # hard_refined = np.array([ full_labels[idx2node[i]] for i in range(len(hard)) ])
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
-    stats = detection_stats(hard_refined, true_labels)
+    stats = detection_stats(preds, true_labels)
     # sub_preds = np.array([preds[i] for i in obs_nodes])
     # sub_true_labels = np.array([true_labels[i] for i in obs_nodes])
     # sub_stats = detection_stats(sub_preds, sub_true_labels)
