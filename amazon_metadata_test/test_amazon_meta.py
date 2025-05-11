@@ -51,10 +51,19 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.INFO)
     # logging.getLogger().addHandler(handler)
     
-    G = nx.read_gml("amazon_metadata_test/amazon_hamming_inv_videoDVD.gml")
+    G = nx.read_gml("amazon_metadata_test/amazon_hamming_bookDVD.gml")
     G = coords_str2arr(G)
+    comm_counts = {}
+    for _, data in G.nodes(data=True):
+        comm = data.get("comm")
+        if comm is not None:
+            comm_counts[comm] = comm_counts.get(comm, 0) + 1
+
+    print("Count of nodes for each 'comm' attribute:")
+    for comm, count in comm_counts.items():
+        print(f"{comm}: {count}")
     # Subsample G to 25% of its nodes
-    num_nodes = int(0.10 * G.number_of_nodes())
+    num_nodes = int(0.25 * G.number_of_nodes())
     random.seed(42)
     selected_nodes = random.sample(list(G.nodes()), num_nodes)
     G = G.subgraph(selected_nodes).copy()
@@ -73,28 +82,49 @@ if __name__ == "__main__":
     
     results_folder = "amazon_metadata_test/"
     # add distances to G - use more sophisticated distance scaling approach
-    max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
-    for u, v in G.edges():
-        dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
-        # Use modified sigmoid with better scaling
-        scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
-        G.edges[u, v]["dist"] = scaled_dist
-        G.edges[v, u]["dist"] = scaled_dist
+    # max_dist = max(float(G[u][v]["dist"]) for u, v in G.edges())
+    # for u, v in G.edges():
+    #     dist = float(G[u][v]["dist"]) / max_dist  # Normalize distances
+    #     # Use modified sigmoid with better scaling
+    #     scaled_dist = 3.0 / (1.0 + np.exp(-5.0 * dist))
+    #     G.edges[u, v]["dist"] = scaled_dist
+    #     G.edges[v, u]["dist"] = scaled_dist
     print("Added distances to edges")
     
-    res = duo_spec(
-        G,
-        K=2,
-        num_balls=32,
-        config = ('bethe_hessian', 'bethe_hessian'),
-        warmup_rounds=2
-    )
+    # res = duo_spec(
+    #     G,
+    #     K=2,
+    #     num_balls=32,
+    #     config = ('laplacian', 'laplacian'),
+    # )
     # res = duo_bp(
     #     G, 
     #     K=2, 
-    #     num_balls=64,
+    #     num_balls=128,
     # )
-    
+    res = duo_bp(
+        G,
+        K             = 2,
+        num_balls     = 40,           # more geometry resolution
+        max_em_iters  = 80,
+        anneal_steps  = 10,
+        warmup_rounds = 5,
+        comm_cut      = 0.82,
+        geo_cut       = 0.75,
+        shrink_comm   = 0.60,
+        shrink_geo    = 0.60,
+        w_min         = 1e-2,
+        patience      = 10,
+        bp_kwargs = dict(
+            init                  = "spectral",   # helpful in GBM
+            max_iter              = 3000,
+            damping               = 0.15,         # will be overwritten by schedule
+            balance_regularization= 0.15,
+            tol                   = 1e-5,
+        ),
+        seed = 42,
+    )
+   
     
     preds = res["communities"]
     print(f"Finished bethe_duo_bp with {len(preds)} predictions")
