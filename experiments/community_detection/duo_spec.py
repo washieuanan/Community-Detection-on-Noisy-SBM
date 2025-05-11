@@ -22,6 +22,137 @@ from scipy.sparse.linalg import eigs
 from typing import Union, Tuple
 from scipy.sparse.linalg import LinearOperator, eigsh
 from scipy.sparse.csgraph import shortest_path
+import math
+from copy import deepcopy
+from typing import Hashable, Iterable
+from numpy.random import default_rng
+from experiments.community_detection.bp.duo_bp import duo_bp
+
+# censoring schemes
+# ---------------------------------------------------------------------
+# 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
+# ---------------------------------------------------------------------
+def erdos_renyi_mask(
+    G: nx.Graph,
+    rho: float,
+    *,
+    seed: int | None = None,
+    copy_node_attrs: bool = True,
+) -> nx.Graph:
+    """
+    Return a *censored* graph in which each edge of ``G`` is kept
+    independently with probability ``rho`` and deleted otherwise.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        The original (latent) graph.
+    rho : float in (0,1]
+        Retention probability P(edge is observed).
+    seed : int or None
+        Random-state seed for reproducibility.
+    copy_node_attrs : bool
+        If True, copy node attributes to the censored graph.
+
+    Returns
+    -------
+    H : networkx.Graph
+        Graph with the same node set as ``G`` but with
+        each edge kept w.p. ``rho``.
+    """
+    if not (0.0 <= rho <= 1.0):
+        raise ValueError("rho must be in [0,1]")
+
+    rng = default_rng(seed)
+    # --- create empty graph with same node set -----------------------
+    H = nx.Graph()
+    if copy_node_attrs:
+        # deep-copy node attributes
+        for u, attrs in G.nodes(data=True):
+            H.add_node(u, **deepcopy(attrs))
+    else:
+        H.add_nodes_from(G.nodes())
+
+    # --- Bernoulli retention for each edge ---------------------------
+    for u, v, attrs in G.edges(data=True):
+        if rng.random() < rho:
+            H.add_edge(u, v, **deepcopy(attrs))
+
+    return H
+
+
+# ---------------------------------------------------------------------
+# 2)  Geometric censoring  (keep edges whose ‖coords_u – coords_v‖ ≤ r)
+# ---------------------------------------------------------------------
+def geometric_censor(
+    G: nx.Graph,
+    r: float,
+    *,
+    coord_key: str = "coords",
+    metric: str = "euclidean",
+    copy_node_attrs: bool = True,
+) -> nx.Graph:
+    """
+    Keep only those edges whose *geometric* distance between the
+    incident vertices is ≤ r.
+
+    Each node is expected to have a coordinate attribute (default
+    name ``"coords"``) that is an iterable of floats, e.g. a 2- or
+    3-dimensional position.
+
+    Parameters
+    ----------
+    G : networkx.Graph
+        Original graph (must have node attribute ``coord_key``).
+    r : float
+        Retention distance threshold (Euclidean by default).
+    coord_key : str
+        Node-attribute name that contains coordinates.
+    metric : {"euclidean"}  (placeholder for future metrics)
+    copy_node_attrs : bool
+        If True, node attributes are copied into the censored graph.
+
+    Returns
+    -------
+    H : networkx.Graph
+        Graph with exactly those edges (u,v) whose coordinate distance
+        ≤ r.  All vertices of ``G`` are preserved.
+    """
+    if r < 0:
+        raise ValueError("distance threshold r must be non-negative")
+
+    if metric != "euclidean":
+        raise NotImplementedError("Only Euclidean metric supported")
+
+    # --- helper to compute Euclidean distance quickly ---------------
+    def _dist(a: Iterable[float], b: Iterable[float]) -> float:
+        diff = np.fromiter(a, float) - np.fromiter(b, float)
+        return float(np.sqrt(np.dot(diff, diff)))
+
+    # --- create new graph with same nodes ---------------------------
+    H = nx.Graph()
+    if copy_node_attrs:
+        for u, attrs in G.nodes(data=True):
+            H.add_node(u, **deepcopy(attrs))
+    else:
+        H.add_nodes_from(G.nodes())
+
+    # --- iterate over edges & keep those within r --------------------
+    for u, v, attrs in G.edges(data=True):
+        try:
+            cu = G.nodes[u][coord_key]
+            cv = G.nodes[v][coord_key]
+        except KeyError as exc:
+            raise KeyError(
+                f"Node missing '{coord_key}' attribute needed for "
+                "geometric censoring"
+            ) from exc
+
+        if _dist(cu, cv) <= r:
+            H.add_edge(u, v, dist = _dist(cu, cv))
+
+    return H
+
 
 def create_dist_observed_subgraph(num_coords, observations):
     """
@@ -198,10 +329,13 @@ def bethe_hessian(
 
     # ---------- (optional) weight from 'dist' ---------------------------------
     if weight_from_dist:
-        d_vals = np.array([d["dist"] for _, _, d in H_obs.edges(data=True)])
+        d_vals = np.array([d.get("dist", 1.0) for _, _, d in H_obs.edges(data=True)])
         sigma  = (np.median(d_vals) or 1.0) * sigma_scale
         for u, v, d in H_obs.edges(data=True):
-            d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
+            if "dist" in d:
+                d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
+            else:
+                d["weight"] = 1.0  # Default weight when dist is not available
 
     A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
                                    format="csr", weight="weight")
@@ -448,107 +582,195 @@ def get_callable(calls: Union[Tuple, str]):
 # ---------------------------------------------------------------------------
 # EM driver  – spectral dual
 # ---------------------------------------------------------------------------
+# def duo_spec(
+#     H_obs            : nx.Graph,
+#     K                : int,
+#     num_balls        : int = 16,
+#     config           : tuple = ('bethe_hessian', 'bethe_hessian'),
+#     max_em_iters     : int   = 50,
+#     anneal_steps     : int   = 6,
+#     warmup_rounds    : int   = 2,
+#     comm_cut         : float = 0.90,
+#     geo_cut          : float = 0.90,
+#     shrink_comm      : float = 1.00,
+#     shrink_geo       : float = 0.80,
+#     w_min            : float = 5e-2,
+#     tol              : float = 1e-4,
+#     patience         : int   = 7,
+#     random_state     : int   = 0,
+# ):
+#     """
+#     Alternating EM-like refinement driven by the new confidence definition.
+#     """
+#     rng             = np.random.default_rng(random_state)
+#     subG            = deepcopy(H_obs)
+#     edges           = np.asarray(subG.edges(), dtype=object)
+#     node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
+#     iu_global, iv_global = _to_idx(edges, node2idx_global)
+
+#     best, hist = {"obj": -np.inf}, []
+#     no_imp     = 0
+#     config = get_callable(config)
+#     def _current_lambda(step, base, ramp):
+#         if step <= 0:
+#             return 0.0
+#         if step >= ramp:
+#             return base
+#         return base * step / ramp
+
+#     # --------------------------- EM loop -------------------------------------
+#     for em in range(1, max_em_iters + 1):
+
+#         # ------------------------ community step ------------------------------
+#         Q_comm, hard_comm, *_ = config[0](
+#             subG, q=K, random_state=random_state
+#         )
+#         p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
+#         mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
+
+#         # ------------------------ geometry step -------------------------------
+#         Q_geo, hard_geo, *_ = config[1](
+#             subG, q=num_balls, random_state=random_state
+#         )
+#         same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
+#         conf_g     = 0.5 * (Q_geo[iu_global, hard_geo[iu_global]] +
+#                             Q_geo[iv_global, hard_geo[iv_global]])
+#         mask_geo = same_ball & (
+#             conf_g > np.percentile(conf_g, geo_cut * 100)
+#         )
+
+#         # ------------------------ shrink / prune ------------------------------
+#         λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
+#         λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
+
+#         n_drop_comm = n_drop_geo = 0
+#         if em > warmup_rounds:
+#             n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
+#             n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo),
+#                                           λ_geo , w_min)
+
+#         # ------------------------ objective & logging -------------------------
+#         obj = float(np.max(Q_comm, axis=1).sum())   # higher is better
+#         hist.append(dict(
+#             iter=em, obj=obj, edges=subG.number_of_edges(),
+#             drop_comm=n_drop_comm, drop_geo=n_drop_geo,
+#             λ_comm=λ_comm, λ_geo=λ_geo,
+#         ))
+
+#         if obj > best["obj"]:
+#             best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
+#                         node2idx=node2idx_global)
+#             no_imp = 0
+#         else:
+#             no_imp += 1
+
+#         if no_imp >= patience:
+#             print(f"[EM] patience reached ({patience}) at iter {em}")
+#             break
+#         if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
+#             print(f"[EM] converged at iter {em}")
+#             break
+#         if subG.number_of_edges() == 0:
+#             print("[EM] graph emptied – stop")
+#             break
+
+#     hard_final = best["beliefs"].argmax(1)
+#     return dict(
+#         beliefs     = best["beliefs"],
+#         communities = hard_final,
+#         balls       = best["balls"],
+#         node2idx    = best["node2idx"],
+#         idx2node    = {i: u for u, i in best["node2idx"].items()},
+#         history     = hist,
+#     )
+# ----------------------------------------------------------- safe EM driver
 def duo_spec(
-    H_obs            : nx.Graph,
-    K                : int,
-    num_balls        : int = 16,
-    config           : tuple = ('bethe_hessian', 'bethe_hessian'),
-    max_em_iters     : int   = 50,
-    anneal_steps     : int   = 6,
-    warmup_rounds    : int   = 2,
-    comm_cut         : float = 0.90,
-    geo_cut          : float = 0.90,
-    shrink_comm      : float = 1.00,
-    shrink_geo       : float = 0.80,
-    w_min            : float = 5e-2,
-    tol              : float = 1e-4,
-    patience         : int   = 7,
-    random_state     : int   = 0,
+    H_obs           : nx.Graph,
+    K               : int,
+    *,
+    num_patches     : int   = 20,
+    shrink_max      : float = 0.60,      # only scale
+    hub_keep        : int   = 20,        # protect H hub nodes
+    gamma_max       : float = 2.0,       # final geometry penalty
+    warmup_rounds   : int   = 3,
+    ramp_rounds     : int   = 8,
+    max_iter        : int   = 35,
+    tol_obj         : float = 1e-4,
+    patience        : int   = 7,
+    random_state    : int   = 0,
 ):
-    """
-    Alternating EM-like refinement driven by the new confidence definition.
-    """
-    rng             = np.random.default_rng(random_state)
-    subG            = deepcopy(H_obs)
-    edges           = np.asarray(subG.edges(), dtype=object)
-    node2idx_global = {u: i for i, u in enumerate(subG.nodes())}
-    iu_global, iv_global = _to_idx(edges, node2idx_global)
+    """Edge **re-weight** (no deletion) EM with hub protection + γ schedule."""
+    rng  = np.random.default_rng(random_state)
+    G    = deepcopy(H_obs)
 
-    best, hist = {"obj": -np.inf}, []
-    no_imp     = 0
-    config = get_callable(config)
-    def _current_lambda(step, base, ramp):
-        if step <= 0:
-            return 0.0
-        if step >= ramp:
-            return base
-        return base * step / ramp
+    # ----- helpers -----------------------------------------------------------
+    nodes        = list(G.nodes())
+    node2idx     = {u: i for i, u in enumerate(nodes)}
+    edges_arr    = np.asarray(G.edges(), dtype=object)
+    iu, iv       = _to_idx(edges_arr, node2idx)
+    w_orig       = np.fromiter((G[u][v].get("weight", 1.0)
+                                for u, v in edges_arr), float, len(edges_arr))
 
-    # --------------------------- EM loop -------------------------------------
-    for em in range(1, max_em_iters + 1):
+    # hub list to freeze
+    degs   = np.array([G.degree(u) for u in nodes])
+    hubs   = set(np.argsort(degs)[-hub_keep:])
 
-        # ------------------------ community step ------------------------------
-        Q_comm, hard_comm, *_ = config[0](
-            subG, q=K, random_state=random_state
-        )
-        p_same = _edge_same_prob(Q_comm, iu_global, iv_global)
-        mask_comm   = p_same > np.percentile(p_same, comm_cut * 100)
+    best, hist, no_imp = {"obj": -np.inf}, [], 0
+    for it in range(1, max_iter + 1):
 
-        # ------------------------ geometry step -------------------------------
-        Q_geo, hard_geo, *_ = config[1](
-            subG, q=num_balls, random_state=random_state
-        )
-        same_ball  = hard_geo[iu_global] == hard_geo[iv_global]
-        conf_g     = 0.5 * (Q_geo[iu_global, hard_geo[iu_global]] +
-                            Q_geo[iv_global, hard_geo[iv_global]])
-        mask_geo = same_ball & (
-            conf_g > np.percentile(conf_g, geo_cut * 100)
-        )
+        # -- embeddings ------------------------------------------------------
+        Qc, *_ = bethe_hessian(G, q=K, random_state=random_state)
+        p_c    = _edge_same_prob(Qc, iu, iv)
 
-        # ------------------------ shrink / prune ------------------------------
-        λ_comm = _current_lambda(em - warmup_rounds, shrink_comm, anneal_steps)
-        λ_geo  = _current_lambda(em - warmup_rounds, shrink_geo , anneal_steps)
+        Qg, *_ = regularized_laplacian(G, q=num_patches,
+                                       random_state=random_state)
+        p_g    = _edge_same_prob(Qg, iu, iv)
 
-        n_drop_comm = n_drop_geo = 0
-        if em > warmup_rounds:
-            n_drop_comm = _scale_or_prune(subG, mask_comm, p_same, λ_comm, w_min)
-            n_drop_geo  = _scale_or_prune(subG, mask_geo , np.ones_like(mask_geo),
-                                          λ_geo , w_min)
+        # ----- Bethe eigen-gap health check ---------------------------------
+        vals, _ = np.linalg.eigh(nx.normalized_laplacian_matrix(G).toarray())
+        gap_ok  = (vals[1] - vals[0]) > 0.01          # heuristic
+        γ       = gamma_max if gap_ok else 1.0 + (gamma_max-1.0)*0.5
 
-        # ------------------------ objective & logging -------------------------
-        obj = float(np.max(Q_comm, axis=1).sum())   # higher is better
-        hist.append(dict(
-            iter=em, obj=obj, edges=subG.number_of_edges(),
-            drop_comm=n_drop_comm, drop_geo=n_drop_geo,
-            λ_comm=λ_comm, λ_geo=λ_geo,
-        ))
+        # ----- schedules ----------------------------------------------------
+        if it <= warmup_rounds:
+            lam = 0.0
+        else:
+            lam = shrink_max * min(1.0,
+                     (it - warmup_rounds) / float(ramp_rounds))
 
-        if obj > best["obj"]:
-            best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
-                        node2idx=node2idx_global)
+        # ----- re-weight ----------------------------------------------------
+        for (u, v), pc, pg in zip(edges_arr, p_c, p_g):
+            s = (pc - 0.5) - γ * (pg - 0.5)
+            w = G[u][v].get("weight", 1.0)
+            # freeze edges touching hubs
+            if node2idx[u] in hubs or node2idx[v] in hubs:
+                continue
+            # rescale **down** only if s<0
+            if s < 0.0:
+                G[u][v]["weight"] = w * (1.0 - lam * (-s))
+
+        # ----- objective ----------------------------------------------------
+        obj = float(np.max(Qc, axis=1).sum())
+        hist.append(dict(iter=it, obj=obj, lam=lam, γ=γ))
+
+        if obj > best["obj"] + tol_obj * len(nodes):
+            best.update(obj=obj, beliefs=Qc, node2idx=node2idx)
             no_imp = 0
         else:
             no_imp += 1
 
         if no_imp >= patience:
-            print(f"[EM] patience reached ({patience}) at iter {em}")
-            break
-        if em > 1 and abs(obj - hist[-2]["obj"]) < tol:
-            print(f"[EM] converged at iter {em}")
-            break
-        if subG.number_of_edges() == 0:
-            print("[EM] graph emptied – stop")
             break
 
-    hard_final = best["beliefs"].argmax(1)
+    hard = best["beliefs"].argmax(1)
     return dict(
         beliefs     = best["beliefs"],
-        communities = hard_final,
-        balls       = best["balls"],
+        communities = hard,
         node2idx    = best["node2idx"],
         idx2node    = {i: u for u, i in best["node2idx"].items()},
         history     = hist,
     )
+
 
 
 def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000):
@@ -591,9 +813,9 @@ if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
     from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 225
-    b = 75
-    n = 950
+    a = 30
+    b = 5
+    n = 350
     K = 2
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
@@ -605,8 +827,8 @@ if __name__ == "__main__":
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     print("avg_deg:", avg_deg)
     original_density = avg_deg / len(G_true.nodes)
-    C = 0.005 * original_density
-    # print("C:", C)
+    # C = 0.50 * original_density
+    # # print("C:", C)
     # def weight_func(c1, c2):
     #     # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
     #     return 1.0
@@ -621,7 +843,9 @@ if __name__ == "__main__":
     #     obs_nodes.add(p[1])
 
     # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
-    # print("Running Loopy BP …")
+    subG = erdos_renyi_mask(G_true, 0.05, seed=42)
+    # subG = geometric_censor(G_true, 0.3, coord_key="coords")
+    # # print("Running Loopy BP …")
     # beliefs, preds, node2idx, idx2node = belief_propagation(
     #     subG,
     #     q=K,
@@ -632,6 +856,11 @@ if __name__ == "__main__":
     #     damping=0.15,   
     #     balance_regularization=0.05,
     # )
+    
+    res = duo_spec(
+        subG,
+        K=K,
+    )
     # _, labels, _, _ = gbm_em(
     #     subG,
     #     k=K,
@@ -643,35 +872,10 @@ if __name__ == "__main__":
     # )
     # labels = spectral_clustering(subG, q=K, seed=42)
     # preds = np.array([labels[i] for i in range(len(labels))])
-    # res = em_geometry_community(
+    # res = geo_spec_v4(
     #     subG,
-    #     K=K,
-    #     bp_kwargs=dict(
-    #         init = "random",
-    #         max_iter=1000,             # Increase max iterations
-    #         damping=0.4,                # Start with moderate damping 
-    #         balance_regularization=0.2, # Increase balance regularization
-    #         min_steps=70,               # Minimum steps before early convergence
-    #     ),
-    #     num_balls=32,                   # Reduced from 20 for better stability
-    #     max_em_iters=100,
-    #     # conf_threshold=0.75,             # Lower threshold for less aggressive pruning
-    #     tol=1e-6,
-    #     seed=42,
-    #     # ball_weight=0.55,                # Reduced ball pruning influence
-    #     # adaptive_min_edges=True,        # Adaptively decrease min_edges
-    #     # early_stopping_window=5,        # Stop if no improvement for 5 iterations
+    #     K=2,
     # )
-    # res = duo_bp(
-    #     subG,
-    #     K=K,
-    #     num_balls=32,
-    # )
-    res = duo_spec(
-        G_true,
-        K=K,
-        num_balls=32
-    )
     preds = res["communities"]
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)

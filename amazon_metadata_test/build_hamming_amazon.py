@@ -148,43 +148,44 @@ def build_category_graph(products,
     for idx in node_ids:
         G.nodes[idx]['coords'] = X[idx].toarray().flatten().astype(int)
 
-    # # 3) Compute raw Hamming distances for each edge
-    # raw = {}
-    # for u, v in G.edges():
-    #     vec_u = G.nodes[u]['coords']
-    #     vec_v = G.nodes[v]['coords']
-    #     # Hamming = count of differing bits
-    #     raw[(u, v)] = np.count_nonzero(vec_u != vec_v)
-
-    # # 4) Normalize so max(raw) → 1
-    # max_raw = max(raw.values()) if raw else 1
-    # for (u, v), d in raw.items():
-    #     G.edges[u, v]['dist'] = d / max_raw
     # 3) Compute raw Hamming distances for each edge
+    raw = {}
     for u, v in G.edges():
         vec_u = G.nodes[u]['coords']
         vec_v = G.nodes[v]['coords']
-        # Compute number of common categories (both vectors have 1)
-        common = np.sum(np.logical_and(vec_u, vec_v))
-        if common > 0:
-            G.edges[u, v]['dist'] = 1.0 / common
-        else:
-            G.edges[u, v]['dist'] = 2.0
+        # Hamming = count of differing bits
+        raw[(u, v)] = np.count_nonzero(vec_u != vec_v)
+
+    # 4) Normalize so max(raw) → 1
+    max_raw = max(raw.values()) if raw else 1
+    for (u, v), d in raw.items():
+        G.edges[u, v]['dist'] = d / max_raw
+
     return G
 
 
 if __name__ == "__main__":
     import json
     import os
+    import random
     # Example usage
     products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
-    G = build_category_graph(products, subsampled_classes=['DVD','Video'])
+    G = build_category_graph(products, subsampled_classes=['Book','DVD'])
+    # Subsample: keep up to 20,000 nodes for each community
+    books_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 0]
+    music_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 1]
+
+    books_sample = set(random.sample(books_nodes, 20000)) if len(books_nodes) > 20000 else set(books_nodes)
+    music_sample = set(random.sample(music_nodes, 20000)) if len(music_nodes) > 20000 else set(music_nodes)
+
+    keep_nodes = books_sample.union(music_sample)
+    G = G.subgraph(keep_nodes).copy()
     for node in G.nodes():
         if 'coords' in G.nodes[node]:
             coords = G.nodes[node]['coords']
             G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-    nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_inv_videoDVD.gml')
+    nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_bookDVD.gml')
     # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
     
     # node_info = G.nodes['0']['coords']
