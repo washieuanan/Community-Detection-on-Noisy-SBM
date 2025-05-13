@@ -387,9 +387,9 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
-    from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
+    from graph_generation.gbm import generate_gbm
+    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     a = 125
     b = 10
     n = 800

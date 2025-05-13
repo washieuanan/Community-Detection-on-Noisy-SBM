@@ -51,7 +51,7 @@ def motif_counting_community_detection(G: nx.Graph, K: int) -> np.ndarray:
 # === Example usage ===
 if __name__ == "__main__":
     # build or load your graph G and true labels true_labels here
-    G = generate_noisy_sbm(500, K = 2, p_in = 0.6, p_out = 0.1, noise=0.8, dim=2, seed=42, r=0.15)
+    G = generate_noisy_sbm(500, K = 2, p_in = 0.6, p_out = 0.1, sigma=0.1, dim=2, seed=42)
     pred = motif_counting_community_detection(G, 2)
     
     # assuming you have detection_stats(pred, true_labels) → dict or metrics

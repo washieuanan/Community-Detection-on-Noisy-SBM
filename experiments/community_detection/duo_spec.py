@@ -26,9 +26,13 @@ import math
 from copy import deepcopy
 from typing import Hashable, Iterable
 from numpy.random import default_rng
-from experiments.community_detection.bp.duo_bp import duo_bp
+from community_detection.bp.duo_bp import duo_bp
 from sklearn.neighbors import KernelDensity
 from scipy.linalg import eigh
+from cbsm.sbm import generate_noisy_sbm
+# improve Arpack 
+from scipy.sparse.linalg import ArpackNoConvergence, ArpackError
+from scipy.sparse.linalg import lobpcg
 # censoring schemes
 # ---------------------------------------------------------------------
 # 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
@@ -1262,9 +1266,9 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
-    from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
+    from graph_generation.gbm import generate_gbm
+    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     a = 30
     b = 5
     n = 350
@@ -1315,6 +1319,16 @@ if __name__ == "__main__":
     #     damping=0.15,   
     #     balance_regularization=0.05,
     # )
+
+    a = 50
+    b = 10
+    p_in = a * np.log(350) / 350
+    p_out = b * np.log(350) / 350
+
+    print("Our p_in", p_in)
+    print("Our p_out", p_out)
+
+    G_true = generate_noisy_sbm(350, 2, p_in, p_out, 0.5, seed = 42)
     
     res = duo_spec(
         G_true,
