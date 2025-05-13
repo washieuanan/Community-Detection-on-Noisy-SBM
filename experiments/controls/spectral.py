@@ -74,55 +74,91 @@ def bethe_hessian_clustering(G, observations, q, use_nonbacktracking=False):
 
     return np.array([labels[i] for i in range(len(nodes))])
 
-
-def spectral_clustering(G, observations, q):
+def spectral_clustering_community_detection(G: nx.Graph, K: int) -> np.ndarray:
     """
-    Community detection via classic spectral clustering on an unweighted graph
-    built from observed vertex‐pairs.
+    Perform spectral clustering on G to recover K communities.
 
     Parameters
     ----------
     G : networkx.Graph
-        The full set of vertices.
-    observations : list of (u, v, d_uv)
-        Observed pairs (with distances d_uv, which will be ignored here).
-    q : int
+        Undirected graph with n nodes.
+    K : int
         Number of communities.
 
     Returns
     -------
-    np.ndarray
-        Array of length n, where entry i is the community label of node i.
+    np.ndarray of shape (n,)
+        Community labels in {0, 1, …, K-1}, ordered to match sorted(G.nodes()).
     """
-    # 1) build unweighted observation‐graph H
-    H = nx.Graph()
-    H.add_nodes_from(G.nodes())
-    H.add_edges_from([(u, v) for (u, v),  _ in observations])
-
-    # 2) form the normalized Laplacian L
+    # 1) Remap nodes to indices 0..n-1
     nodes = list(G.nodes())
-    A = nx.to_scipy_sparse_array(H, nodelist=nodes, format="csr")
-    L = csgraph.laplacian(A, normed=True)
+    idx = {node: i for i, node in enumerate(nodes)}
+    n = len(nodes)
 
-    # 3) compute the bottom q eigenvectors of L (skip the trivial zero‐mode)
-    evals, evecs = np.linalg.eigh(L.toarray())
-    X = evecs[:, 1 : q + 1]  # shape = (n_nodes, q)
+    # 2) Build the adjacency matrix A (CSR sparse format)
+    #    using nx.adjacency_matrix, which returns a SciPy CSR matrix
+    A = nx.adjacency_matrix(G, nodelist=nodes)
 
-    # 4) cluster rows of X with k‐means
-    km = KMeans(n_clusters=q, random_state=42).fit(X)
-    labels_sub = km.labels_
+    # 3) Compute the normalized Laplacian L_norm = D^{-1/2} (D - A) D^{-1/2}
+    L_norm = csgraph.laplacian(A, normed=True)
 
-    # 5) format labels exactly as requested
-    nodes_sub = nodes
-    n_sub = len(nodes_sub)
-    labels = {nodes_sub[i]: int(labels_sub[i]) for i in range(n_sub)}
+    # 4) Compute the first K eigenvectors of the normalized Laplacian
+    #    (corresponding to the K smallest eigenvalues)
+    vals, vecs = eigsh(L_norm, k=K, which='SM')
 
-    # 6) assign random labels for any missing nodes (shouldn't happen here)
-    rng = np.random.default_rng()
-    other_nodes = set(G.nodes()) - set(nodes_sub)
-    for node in other_nodes:
-        labels[node] = int(rng.integers(0, q))
+    # 5) Cluster the rows of the eigenvector matrix with KMeans
+    km = KMeans(n_clusters=K, n_init=10, random_state=0)
+    labels = km.fit_predict(vecs)
 
-    # 7) return array of labels in node‐index order
-    return np.array([labels[i] for i in range(len(nodes))])
+    return labels
+# def spectral_clustering(G, observations, q):
+#     """
+#     Community detection via classic spectral clustering on an unweighted graph
+#     built from observed vertex‐pairs.
+
+#     Parameters
+#     ----------
+#     G : networkx.Graph
+#         The full set of vertices.
+#     observations : list of (u, v, d_uv)
+#         Observed pairs (with distances d_uv, which will be ignored here).
+#     q : int
+#         Number of communities.
+
+#     Returns
+#     -------
+#     np.ndarray
+#         Array of length n, where entry i is the community label of node i.
+#     """
+#     # 1) build unweighted observation‐graph H
+#     H = nx.Graph()
+#     H.add_nodes_from(G.nodes())
+#     H.add_edges_from([(u, v) for (u, v),  _ in observations])
+
+#     # 2) form the normalized Laplacian L
+#     nodes = list(G.nodes())
+#     A = nx.to_scipy_sparse_array(H, nodelist=nodes, format="csr")
+#     L = csgraph.laplacian(A, normed=True)
+
+#     # 3) compute the bottom q eigenvectors of L (skip the trivial zero‐mode)
+#     evals, evecs = np.linalg.eigh(L.toarray())
+#     X = evecs[:, 1 : q + 1]  # shape = (n_nodes, q)
+
+#     # 4) cluster rows of X with k‐means
+#     km = KMeans(n_clusters=q, random_state=42).fit(X)
+#     labels_sub = km.labels_
+
+#     # 5) format labels exactly as requested
+#     nodes_sub = nodes
+#     n_sub = len(nodes_sub)
+#     labels = {nodes_sub[i]: int(labels_sub[i]) for i in range(n_sub)}
+
+#     # 6) assign random labels for any missing nodes (shouldn't happen here)
+#     rng = np.random.default_rng()
+#     other_nodes = set(G.nodes()) - set(nodes_sub)
+#     for node in other_nodes:
+#         labels[node] = int(rng.integers(0, q))
+
+#     # 7) return array of labels in node‐index order
+#     return np.array([labels[i] for i in range(len(nodes))])
 
