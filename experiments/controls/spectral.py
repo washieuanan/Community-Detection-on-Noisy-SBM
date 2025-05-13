@@ -161,4 +161,3 @@ def spectral_clustering_community_detection(G: nx.Graph, K: int) -> np.ndarray:
 
 #     # 7) return array of labels in node‐index order
 #     return np.array([labels[i] for i in range(len(nodes))])
-
