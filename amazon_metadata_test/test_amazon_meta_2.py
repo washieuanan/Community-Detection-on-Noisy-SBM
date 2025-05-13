@@ -81,7 +81,7 @@ if __name__ == "__main__":
     # logging.getLogger().setLevel(logging.INFO)
     # logging.getLogger().addHandler(handler)
     
-    G = nx.read_gml("amazon_metadata_test/amazon_hamming_bookDVD.gml")
+    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
     G = coords_str2arr(G)
     comm_counts = {}
     for _, data in G.nodes(data=True):
@@ -93,10 +93,10 @@ if __name__ == "__main__":
     for comm, count in comm_counts.items():
         print(f"{comm}: {count}")
     # Subsample G to 25% of its nodes
-    num_nodes = int(0.2 * G.number_of_nodes())
-    random.seed(123)
-    selected_nodes = random.sample(list(G.nodes()), num_nodes)
-    G = G.subgraph(selected_nodes).copy()
+    # num_nodes = int(0.5 * G.number_of_nodes())
+    # random.seed(123)
+    # selected_nodes = random.sample(list(G.nodes()), num_nodes)
+    # G = G.subgraph(selected_nodes).copy()
     G = nx.convert_node_labels_to_integers(G)
     for u, v, edge_data in G.edges(data=True):
         if "dist" in edge_data:
@@ -136,27 +136,27 @@ if __name__ == "__main__":
 
     print("Added distances to edges")
     
-    # duo_params = dict(
-    #     # spectral-EM settings
-    #     K               = 2,                    # number of communities
-    #     num_balls       = 32,                   # finer geometry embedding
-    #     config          = ("bethe_hessian",     # community estimator
-    #                     "bethe_hessian"),        # geometry estimator
+    duo_params = dict(
+        # spectral-EM settings
+        K               = 2,                    # number of communities
+        num_balls       = 64,                   # finer geometry embedding
+        config          = ("laplacian",     # community estimator
+                        "bethe_hessian"),        # geometry estimator
 
-    #     # — EM schedule
-    #     max_em_iters    = 100,                  # allow more EM steps
-    #     warmup_rounds   = 2,                   # hold off on any re-weighting
-    #     anneal_steps    = 20,                   # then ramp λ from 0→full over 30 iter
+        # — EM schedule
+        max_em_iters    = 100,                  # allow more EM steps
+        warmup_rounds   = 2,                   # hold off on any re-weighting
+        anneal_steps    = 20,                   # then ramp λ from 0→full over 30 iter
 
-    #     # — convergence
-    #     tol             = 1e-5,
-    #     patience        = 10,
-    #     random_state    = 42,
-    # )
+        # — convergence
+        tol             = 1e-5,
+        patience        = 10,
+        random_state    = 42,
+    )
     
-    # res = duo_spec(G, **duo_params)
+    res = duo_spec(G, **duo_params)
 
-    # preds = res['communities']
+    preds = res['communities']
     # G_fin = res['G_final']
     # # preds = res['communities']
     # weights = [data.get("weight") for _, _, data in G_fin.edges(data=True) if "weight" in data]
@@ -173,11 +173,10 @@ if __name__ == "__main__":
     # else:
     #     print("No 'weight' attribute found on any edge.")
 
-    # connect_components(G_fin)
     # _, preds, _, _ = belief_propagation_weighted(
     #     G_fin, 
     #     q=2, 
-    #     max_iter = 1000,
+    #     max_iter = 3000,
     # )
     
     
@@ -197,16 +196,16 @@ if __name__ == "__main__":
     #     if not G.has_edge(i, j):
     #         G.add_edge(i, j, weight=ε, dist=2)
     # connect_components(G)
-    _, preds, _, _ = belief_propagation(
-        G, 
-        q=2, 
-        max_iter = 1000,
-    )
+    # _, preds, _, _ = belief_propagation(
+    #     G, 
+    #     q=2, 
+    #     max_iter = 3000,
+    # )
     
     # preds = res["communities"]
     
     # preds = spectral_clustering_community_detection(
-    #     G, K=4)
+    #     G, K=2)
     # preds = motif_counting(
     #     G, q=2)
     print(f"Finished bethe_duo_bp with {len(preds)} predictions")

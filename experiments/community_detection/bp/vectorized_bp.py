@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Literal
 import networkx as nx
 import numpy as np
+import scipy.sparse as sp
 
 from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, confusion_matrix
@@ -35,16 +36,46 @@ def build_arrays(G: nx.Graph):
 # -----------------------------------------------------------------------------
 #  Spectral initialisation helpers
 # -----------------------------------------------------------------------------
-
 def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
-    # Make sure the adjacency matrix uses a valid dtype for eigs
-    adj_mat = nx.adjacency_matrix(G).astype(np.float64)
-    ncv = min(adj_mat.shape[0] - 1, max(2*q + 1, q + 20))
-    
+    # 1) build normalized Laplacian
+    A = nx.adjacency_matrix(G).astype(np.float64)
+    n = A.shape[0]
+    degrees = np.ravel(A.sum(axis=1))
+    inv_sqrt = np.where(degrees>0, 1.0/np.sqrt(degrees), 0.0)
+    D_inv_sqrt = sp.diags(inv_sqrt)
+    L = sp.eye(n, format="csr") - D_inv_sqrt @ A @ D_inv_sqrt
+    # symmetrize to avoid tiny nonsymmetric noise
+    L = (L + L.T) * 0.5
 
-    vals, vecs = sla.eigs(adj_mat, k=q, which="LM", tol=1e-4, ncv=ncv, maxiter=1000)
+    # 2) try ARPACK for the smallest q+1 eigenpairs
+    k = q + 1
+    ncv = min(n - 1, max(2*k + 1, k + 20))
+    try:
+        vals, vecs = eigsh(
+            L,
+            k=k,
+            which="SM",
+            tol=1e-4,
+            ncv=ncv,
+            maxiter=1000
+        )
+        # drop the first (trivial) eigenvector
+        idx = np.argsort(vals)
+        vecs = vecs[:, idx[1 : q+1]]
+    except ArpackNoConvergence:
+        # fallback to LOBPCG for the q smallest eigenvectors
+        X0 = np.random.RandomState(seed).randn(n, q)
+        _, vecs = lobpcg(
+            L,
+            X0,
+            tol=1e-4,
+            maxiter=200,
+            largest=False
+        )
+
+    # 3) cluster & return
     km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
-    return {n: int(l) for n, l in zip(G.nodes(), km.labels_)}
+    return {node: int(label) for node, label in zip(G.nodes(), km.labels_)}
 
 
 def init_beliefs(n: int, q: int, rng, labels=None, node2idx=None, bias: float = 0.2):
@@ -293,6 +324,163 @@ def belief_propagation(
             messages /= messages.sum(1)[:, None]
 
         messages_old, messages = messages, messages_old  # swap buffers
+    else:
+        print(f"[BP] did not converge within {max_iter} iterations (Δ={delta:.2e})")
+
+    preds = beliefs.argmax(1)
+    return beliefs, preds, node2idx, idx2node
+
+
+def belief_propagation_weighted(
+    G: nx.Graph,
+    q: int,
+    *,
+    beta: float | None = None,
+    max_iter: int = 1000,
+    tol: float = 1e-4,
+    damping: float = 0.20,
+    balance_regularization: float = 0.10,
+    seed: int = 0,
+    min_steps: int = 0,
+    init: Literal["random", "spectral"] = "random",
+    msg_init: Literal["random", "copy", "pre-group"] = "random",
+    group_obs: List | None = None,
+    min_sep: float | None = None,
+    eps: float = 0.1,
+):
+    """Vectorised BP that reproduces the exact math/logic of the reference loop,
+       but uses each edge’s 'weight' as a scaling on the pairwise compatibility."""
+    rng = np.random.default_rng(seed)
+    
+    if G.number_of_edges() < 1:
+        print("[BP] Warning: Graph has no edges, returning random beliefs")
+        node2idx = {u: i for i, u in enumerate(G)}
+        idx2node = {i: u for u, i in node2idx.items()}
+        n = len(node2idx)
+        beliefs = init_beliefs(n, q, rng)
+        preds = beliefs.argmax(1)
+        return beliefs, preds, node2idx, idx2node
+
+    # ---------------------------------------------------------------------
+    #  Pre-compute arrays & constants
+    # ---------------------------------------------------------------------
+    node2idx, idx2node, src, dst, rev = build_arrays(G)
+    n, m = len(node2idx), src.size // 2
+    deg = np.fromiter((G.degree[u] for u in G), int)
+
+    # --- NEW: directed-edge weights array ---
+    w = np.array([
+        G.edges[idx2node[src[i]], idx2node[dst[i]]].get("weight", 1.0)
+        for i in range(src.size)
+    ])
+    w = (w - w.mean())/w.std()
+    w = (w/np.max(abs(w))) + 1.0
+    if beta is None:
+        beta = beta_param(G, q) * 1.2
+    exp_beta = np.exp(beta)
+
+    # ---------------------------------------------------------------------
+    #  Initial beliefs & messages
+    # ---------------------------------------------------------------------
+    spectral_labels = (
+        spectral_clustering(G, q, seed=seed) if init == "spectral" else {}
+    )
+    beliefs = init_beliefs(n, q, rng, labels=spectral_labels, node2idx=node2idx)
+    spec_arr = np.array([spectral_labels.get(idx2node[i], 0) for i in range(n)], int)
+
+    messages_old = init_messages(
+        q, src, dst,
+        method=msg_init,
+        rng=rng,
+        beliefs=beliefs,
+        spec_arr=spec_arr,
+        node2idx=node2idx,
+        group_obs=group_obs,
+        min_sep=min_sep,
+        eps=eps,
+    )
+    messages = np.empty_like(messages_old)
+
+    S = np.empty((n, q))
+    convergence_history: List[float] = []
+
+    for it in range(max_iter):
+        # --------------------------------------------------------------
+        #  Belief update
+        # --------------------------------------------------------------
+        # ------------------ MODIFIED LINE ------------------
+        # edge_fac = 1.0 + (exp_beta - 1.0) * messages_old.clip(1e-10) * w[:, None]
+        exp_beta_w = np.exp(beta * w)
+        edge_fac   = 1 + (exp_beta_w[:, None] - 1) * messages_old.clip(1e-10)
+        
+        # ----------------------------------------------------
+        log_fac = np.log(edge_fac)
+        S.fill(0.0)
+        np.add.at(S, dst, log_fac)
+
+        log_beliefs = S - S.max(1)[:, None]
+        beliefs[:] = np.exp(
+            log_beliefs - np.log(np.exp(log_beliefs).sum(1)[:, None] + 1e-10)
+        )
+
+        comm_sz = beliefs.mean(0).clip(1e-10)
+        theta = (deg[:, None] * beliefs).sum(0).clip(1e-10)
+
+        # --------------------------------------------------------------
+        #  Message update
+        # --------------------------------------------------------------
+        if m > 0:
+            log_messages = (
+                -beta * deg[src, None] * theta / (2.0 * m)
+                + S[src]
+                - log_fac[rev]
+                - balance_regularization * np.log(comm_sz)
+            )
+            log_max = log_messages.max(1)[:, None]
+            messages_new = np.exp(log_messages - log_max)
+            messages_new /= messages_new.sum(1)[:, None].clip(1e-10)
+        else:
+            messages_new = np.ones_like(messages_old)
+            messages_new /= messages_new.sum(1)[:, None].clip(1e-10)
+
+        messages[:] = (1.0 - damping) * messages_new + damping * messages_old
+
+        # --------------------------------------------------------------
+        #  Convergence check & optional entropy-based noise reinjection
+        # --------------------------------------------------------------
+        if messages.size == 0:
+            print("[BP] Warning: Empty message arrays detected, aborting loop")
+            delta = 0.0
+            break
+
+        try:
+            delta = np.max(np.abs(messages - messages_old))
+            if np.isnan(delta):
+                print("[BP] Warning: NaN values detected, increasing damping")
+                damping = min(damping * 1.5, 0.9)
+                messages[:] = messages_old
+                continue
+        except ValueError as e:
+            if "zero-size array" in str(e):
+                print("[BP] Warning: Zero-size array in delta calculation, aborting loop")
+                delta = 0.0
+                break
+            else:
+                raise
+
+        convergence_history.append(float(delta))
+
+        if delta < tol and it >= min_steps:
+            entropy = -np.sum(comm_sz * np.log(comm_sz + 1e-10))
+            entropy_ratio = entropy / (-np.log(1.0 / q))
+            if entropy_ratio > 0.7:
+                print(f"[BP] converged in {it+1} iterations; entropy ratio={entropy_ratio:.3f}")
+                break
+            noise = rng.random(messages.shape) * 0.15 / (comm_sz + 1e-10)
+            messages[:] = messages * 0.85 + noise
+            messages /= messages.sum(1)[:, None]
+
+        messages_old, messages = messages, messages_old
     else:
         print(f"[BP] did not converge within {max_iter} iterations (Δ={delta:.2e})")
 
