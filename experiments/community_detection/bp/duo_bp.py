@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.vectorized_bp import belief_propagation
+from experiments.community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 from collections import defaultdict
-from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 
 # def belief_propagation(
@@ -281,7 +281,7 @@ def duo_bp(
         bp_kwargs["damping"] = damp_high - frac * (damp_high - damp_low)
 
         # ======== COMMUNITY step (BP, q=K) ================================
-        bel_c, _, n2i_c, _ = belief_propagation(
+        bel_c, _, n2i_c, _ = belief_propagation_weighted(
             subG, q=K, **bp_kwargs
         )
         p_same = _edge_same_prob(bel_c, iu_glob, iv_glob)
@@ -292,7 +292,7 @@ def duo_bp(
         λ_c   = max(0.0, λ_c)        # during warm-up λ→0
 
         # ======== GEOMETRIC step (BP, q=num_balls) ========================
-        bel_g, _, n2i_g, _ = belief_propagation(
+        bel_g, _, n2i_g, _ = belief_propagation_weighted(
             subG, q=num_balls, **bp_kwargs
         )
         lbls_g   = bel_g.argmax(1)
