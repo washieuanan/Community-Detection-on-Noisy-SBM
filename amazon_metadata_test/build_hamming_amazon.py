@@ -159,7 +159,7 @@ def build_category_graph(products,
     # 4) Normalize so max(raw) → 1
     max_raw = max(raw.values()) if raw else 1
     for (u, v), d in raw.items():
-        G.edges[u, v]['dist'] = d / max_raw
+        G.edges[u, v]['dist'] = 2 * (d / max_raw)
 
     return G
 
@@ -168,24 +168,108 @@ if __name__ == "__main__":
     import json
     import os
     import random
+    from collections import Counter
+    import networkx as nx
+    from collections import defaultdict
     # Example usage
     products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
-    G = build_category_graph(products, subsampled_classes=['Book','DVD'])
-    # Subsample: keep up to 20,000 nodes for each community
-    books_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 0]
-    music_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 1]
+    G = build_category_graph(products, subsampled_classes=['Book','Music'])
+    def subsample_equal_connected(G, desired_n=1000, class_attr='comm', seed=None):
+        rng = random.Random(seed)
 
-    books_sample = set(random.sample(books_nodes, 20000)) if len(books_nodes) > 20000 else set(books_nodes)
-    music_sample = set(random.sample(music_nodes, 20000)) if len(music_nodes) > 20000 else set(music_nodes)
+        # 1) group nodes by class
+        nodes_by_comm = defaultdict(list)
+        for u, data in G.nodes(data=True):
+            if class_attr in data:
+                nodes_by_comm[data[class_attr]].append(u)
+        classes = list(nodes_by_comm)
+        n_classes = len(classes)
+        if n_classes == 0:
+            raise ValueError("No classes found in G")
 
-    keep_nodes = books_sample.union(music_sample)
-    G = G.subgraph(keep_nodes).copy()
+        # 2) compute per‐class quotas
+        base = desired_n // n_classes
+        rem  = desired_n % n_classes
+        quotas = {}
+        for i, c in enumerate(classes):
+            quotas[c] = base + (1 if i < rem else 0)
+
+        # 3) BFS‐grow a connected sample until quotas are met (seed in largest class)
+        start_comm = max(classes, key=lambda c: len(nodes_by_comm[c]))
+        start_node = rng.choice(nodes_by_comm[start_comm])
+        selected    = [start_node]
+        quotas[start_comm] -= 1
+
+        visited = {start_node}
+        queue   = [start_node]
+
+        while queue and any(q > 0 for q in quotas.values()):
+            u = queue.pop(0)
+            for v in G.neighbors(u):
+                if v in visited:
+                    continue
+                visited.add(v)
+                c = G.nodes[v].get(class_attr)
+                if quotas.get(c, 0) > 0:
+                    selected.append(v)
+                    quotas[c] -= 1
+                    queue.append(v)
+            if all(q == 0 for q in quotas.values()):
+                break
+
+        # 4) if you still didn’t hit 1 000, fill the rest at random
+        if len(selected) < desired_n:
+            needed = desired_n - len(selected)
+            pool = list(set(G.nodes()) - set(selected))
+            selected.extend(rng.sample(pool, needed))
+
+        # 5) finally, reconnect any disjoint bits by sewing in the shortest paths
+        def connect_components(G, nodes):
+            sub = G.subgraph(nodes).copy()
+            comps = list(nx.connected_components(sub))
+            if len(comps) == 1:
+                return sub
+            master = set(comps[0])
+            for comp in comps[1:]:
+                u = rng.choice(list(comp))
+                v = rng.choice(list(master))
+                path = nx.shortest_path(G, u, v)
+                master.update(path)
+                master.update(comp)
+            return G.subgraph(master).copy()
+
+        return connect_components(G, selected)
+    # # Subsample: keep up to 20,000 nodes for each community
+    # books_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 0]
+    # music_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 1]
+    # video_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 2]
+    # dvd_nodes = [n for n, data in G.nodes(data=True) if data.get('comm') == 3]
+
+    # books_sample = set(random.sample(books_nodes, 5000)) if len(books_nodes) > 5000 else set(books_nodes)
+    # music_sample = set(random.sample(music_nodes, 5000)) if len(music_nodes) > 5000 else set(music_nodes)
+    # video_sample = set(random.sample(video_nodes, 5000)) if len(video_nodes) > 5000 else set(video_nodes)
+    # dvd_sample = set(random.sample(dvd_nodes, 5000)) if len(dvd_nodes) > 5000 else set(dvd_nodes)
+
+    # keep_nodes = books_sample.union(music_sample, video_sample, dvd_sample)
+    # G = G.subgraph(keep_nodes).copy()
+    G = subsample_equal_connected(G, desired_n=2000, class_attr='comm', seed=123)
+    print("Number of nodes:", G.number_of_nodes())
+    print("Graph is connected:", nx.is_connected(G))
+
+    comm_counts = {}
+    for _, data in G.nodes(data=True):
+        if 'comm' in data:
+            comm_counts[data['comm']] = comm_counts.get(data['comm'], 0) + 1
+
+    print("Nodes per comm:")
+    for comm, count in comm_counts.items():
+        print(f"  {comm}: {count}")
     for node in G.nodes():
         if 'coords' in G.nodes[node]:
             coords = G.nodes[node]['coords']
             G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-    nx.write_gml(G, 'amazon_metadata_test/amazon_hamming_bookDVD.gml')
+    nx.write_gml(G, 'amazon_metadata_test/amz_bookmusic.gml')
     # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
     
     # node_info = G.nodes['0']['coords']

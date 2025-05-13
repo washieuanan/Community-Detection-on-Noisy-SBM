@@ -8,9 +8,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.vectorized_bp import belief_propagation
+from experiments.community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 from collections import defaultdict
-from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 from scipy.sparse import diags
 from sklearn.cluster import KMeans
@@ -20,7 +20,7 @@ from numpy.linalg import norm
 import scipy.sparse as sp
 from scipy.sparse.linalg import eigs
 from typing import Union, Tuple
-from scipy.sparse.linalg import LinearOperator, eigsh
+from scipy.sparse.linalg import LinearOperator, eigsh, lobpcg
 from scipy.sparse.csgraph import shortest_path
 import math
 from copy import deepcopy
@@ -513,8 +513,9 @@ def bethe_hessian(
     # ---------- Bethe–Hessian -------------------------------------------------
     I  = diags(np.ones(n))
     Hr = (r * r - 1.0) * I - r * A + D
-
-    vals, vecs = eigsh(-Hr, k=q, which="LA")   # (n,q)
+    k = q + 1
+    ncv = 2 * min(n - 1, max(2*k + 1, k + 20))
+    vals, vecs = eigsh(-Hr, k=q, which="LA", ncv = ncv)   # (n,q)
 
     # ---------- k-means & confidence -----------------------------------------
     km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
@@ -525,6 +526,69 @@ def bethe_hessian(
     return Q, hard, node2idx, idx2node
 
 
+def bethe_hessian_fast(
+    H_obs                : nx.Graph,
+    q                    : int,
+    *,
+    weight_from_dist     : bool    = True,
+    sigma_scale          : float   = 1.0,
+    use_lobpcg           : bool    = True,
+    tol                  : float   = 1e-3,
+    maxiter              : int     = 200,
+    random_state         : int     = 42,
+    prev_evecs           : np.ndarray = None,
+):
+    """
+    Fast Bethe–Hessian embedding via LOBPCG or warm-started ARPACK.
+    """
+    # --- build sparse adjacency with weights ---
+    nodes    = list(H_obs.nodes())
+    idx      = {u:i for i,u in enumerate(nodes)}
+    n        = len(nodes)
+
+    if weight_from_dist:
+        d_vals = np.array([d.get("dist",1.0) for *_,d in H_obs.edges(data=True)])
+        sigma  = max(np.median(d_vals), 1.0) * sigma_scale
+        for u,v,d in H_obs.edges(data=True):
+            d["weight"] = np.exp(-0.5*(d.get("dist",1.0)/sigma)**2)
+
+    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
+                                   weight="weight", format="csr")
+    deg = np.ravel(A.sum(axis=1))
+    D   = diags(deg)
+
+    # --- choose r ---
+    r = np.sqrt(deg.mean())
+
+    # --- build Hr ---
+    I  = diags(np.ones(n))
+    Hr = (r*r - 1.0)*I - r*A + D
+
+    # --- spectral solve ---
+    if use_lobpcg:
+        # Lobpcg tends to converge in O(n·q) per iteration
+        X0 = (prev_evecs 
+              if (prev_evecs is not None and prev_evecs.shape==(n,q))
+              else np.random.RandomState(random_state).randn(n,q))
+        vals, vecs = lobpcg(Hr, X0, tol=tol, maxiter=maxiter)
+    else:
+        # ARPACK on the smallest eigenvalues of Hr
+        # warm‐start with prev_evecs flattened to v0
+        eig_kwargs = dict(which="SM", tol=tol, maxiter=maxiter)
+        if prev_evecs is not None:
+            eig_kwargs["v0"] = prev_evecs[:,0]
+        vals, vecs = eigsh(Hr, k=q, **eig_kwargs)
+
+    # --- k-means & confidence ---
+    km   = KMeans(n_clusters=q, n_init=10, random_state=random_state).fit(vecs)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+    # soft confidences
+    diff = vecs[:,None,:] - mu[None,:,:]       # shape (n,q,q)
+    Q    = np.exp(-np.sum(diff**2, axis=2))
+    Q   /= Q.sum(axis=1, keepdims=True)
+
+    return Q, hard, idx, {i:u for u,i in idx.items()}, vecs
 # # ---------------------------------------------------------------------------
 # # 2) Normalised-Laplacian community step  (soft confidence)
 # # ---------------------------------------------------------------------------
@@ -928,6 +992,7 @@ def get_callable(calls: Union[Tuple, str]):
         "regularized_laplacian": regularized_laplacian,
         "morans":            morans,
         "score":             score,
+        "bethe_hessian_fast": bethe_hessian_fast,
     }
     if isinstance(calls, str):
         return (func_dict[calls], func_dict[calls])
@@ -1029,6 +1094,7 @@ def duo_spec(
 
     # -----------------------------------------------------------------------
     for em in range(1, max_em_iters + 1):
+        print(f"[EM] iter {em} / {max_em_iters}")
         # ---------------- community embedding -----------------------------
         Q_comm, hard_comm, *_ = config[0](
             subG, q=K, random_state=random_state
@@ -1139,7 +1205,7 @@ def duo_bprop(
 
     for em in range(1, max_em_iters+1):
         # ---------------- BP for communities -------------------------
-        bel_c, _, n2i, _ = belief_propagation(G, q=K, **kwargs)
+        bel_c, _, n2i, _ = belief_propagation_weighted(G, q=K, **kwargs)
         edges   = np.asarray(G.edges(), dtype=object)
         iu, iv  = _to_idx(edges, n2i)
         p_same  = _edge_same_prob(bel_c, iu, iv)
@@ -1158,7 +1224,7 @@ def duo_bprop(
             data["w_extra"] = (factor-1)*data["w_orig"]
 
         # ---------------- Geometry step  (soft down-weight) ----------
-        bel_g, _, n2i_g, _ = belief_propagation(G, q=min(16, K*2), **kwargs)
+        bel_g, _, n2i_g, _ = belief_propagation_weighted(G, q=min(16, K*2), **kwargs)
         lbls_g = bel_g.argmax(1)
         iu_g, iv_g = _to_idx(edges, n2i_g)
         same_ball  = lbls_g[iu_g] == lbls_g[iv_g]
@@ -1222,8 +1288,6 @@ def duo_bprop(
         history=hist,
         G_final=G,                 # in case one wants to inspect weights
     )
-
-
 
 def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000):
     """Compute accuracy, per‑community stats, and permutation‑test p‑value."""
