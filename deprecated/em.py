@@ -8,10 +8,10 @@ from scipy.sparse.csgraph import laplacian
 from sklearn.cluster import KMeans
 
 #pylint: disable=unused-import, redefined-outer-name
-from graph_generation.generate_graph import generate_latent_geometry_graph
-from observations.random_walk_obs import random_walk_observations
-from observations.standard_observe import get_coordinate_distance
-from ..algorithms.detect import Detection
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.random_walk_obs import random_walk_observations
+from deprecated.observations.standard_observe import get_coordinate_distance
+from algorithms.detect import Detection
 
 
 def initialize_latent(G, dim):
@@ -266,7 +266,6 @@ def eval_em_accuracy(nodes, q, G):
 
 
 if __name__ == "__main__":
-    from graph_generation.gbm import generate_gbm
     # distributions = ['normal', 'normal', 'normal']
     # dist_params = [
     #     {'loc':[-0.3, 0.1, 0.3], 'scale':0.2, 'constrain_to_unit_sphere':True},

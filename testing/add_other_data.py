@@ -6,11 +6,11 @@ import networkx as nx
 from networkx.readwrite import json_graph
 import numpy as np
 
-from cbsm.sbm import generate_sbm
+from block_models.cbsm.sbm import generate_sbm
 from algorithms.duo_spec import duo_spec, get_true_communities, detection_stats, erdos_renyi_mask, duo_bprop
 from community_detection.bp.vectorized_bp import belief_propagation
-from cbsm.motif import motif_counting_community_detection
-from cbsm.spectral import spectral_clustering_community_detection
+from block_models.cbsm.motif import motif_counting_community_detection
+from block_models.cbsm.spectral import spectral_clustering_community_detection
 from testing.testing_methods import _json_convert
 
 # Ensure directories exist

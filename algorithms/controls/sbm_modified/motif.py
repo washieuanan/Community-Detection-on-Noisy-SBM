@@ -1,10 +1,11 @@
+import networkx as nx
 import numpy as np
 import itertools
-import networkx as nx
 from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
-from cbsm.sbm import generate_noisy_sbm
+from block_models.cbsm.sbm import generate_noisy_sbm
 from algorithms.duo_spec import detection_stats, get_true_communities
+from typing import List, Tuple, Any
 
 def motif_counting_community_detection(G: nx.Graph, K: int) -> np.ndarray:
     """

@@ -5,6 +5,7 @@ import networkx as nx
 
 
 from .observe import Observation
+from experiments.graph_generation.gbm import generate_gbm
 
 
 def euclid_dist(a: np.ndarray, b: np.ndarray) -> float:
@@ -339,7 +340,7 @@ class GroupedMultiSensorObservation(MultiSensorObservation):
 
     
 if __name__ == "__main__":
-    from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
+    from experiments.graph_generation.gbm import generate_gbm
 
     # G, coords, _ = generate_latent_geometry_graph([30, 40],
     #                                               connectivity_threshold=0.75)
@@ -354,7 +355,7 @@ if __name__ == "__main__":
 
 
    
-    G, coords, _ = generate_latent_geometry_graph([100,150], connectivity_threshold=0.75)
+    G, coords, _ = generate_gbm([100,150], connectivity_threshold=0.75)
 
     # single = SingleSensorObservation(G, seed=42, sensor=0, radii=np.linspace(0.1,1.0,10))
     # edges1 = single.observe()
