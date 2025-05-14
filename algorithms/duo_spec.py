@@ -8,12 +8,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
-from community_detection.bp.vectorized_bp import spectral_clustering
+from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from algorithms.bp.vectorized_bp import spectral_clustering
 from collections import defaultdict
-from community_detection.bp.duo_bp import duo_bp
 from copy import deepcopy
-from scipy.sparse import diags
+from scipy.sparse import diags, identity
 from sklearn.cluster import KMeans
 from scipy.sparse import csgraph
 from scipy.sparse.csgraph import laplacian as cs_lap
@@ -27,11 +26,12 @@ import math
 from copy import deepcopy
 from typing import Hashable, Iterable
 from numpy.random import default_rng
-from experiments.graph_generation.gbm import generate_gbm
+from block_models.gbm.gbm import generate_gbm
+from block_models.sbm.sbm import generate_noisy_sbm
 from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 from sklearn.neighbors import KernelDensity
 from scipy.linalg import eigh
+import random
 # censoring schemes
 # ---------------------------------------------------------------------
 # 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
@@ -91,10 +91,12 @@ def erdos_renyi_mask(
 def geometric_censor(
     G: nx.Graph,
     r: float,
+    p: float = 0.75,
     *,
     coord_key: str = "coords",
     metric: str = "euclidean",
     copy_node_attrs: bool = True,
+    seed: int = 42
 ) -> nx.Graph:
     """
     Keep only those edges whose *geometric* distance between the
@@ -124,7 +126,7 @@ def geometric_censor(
     """
     if r < 0:
         raise ValueError("distance threshold r must be non-negative")
-
+    random.seed(seed)
     if metric != "euclidean":
         raise NotImplementedError("Only Euclidean metric supported")
 
@@ -154,6 +156,9 @@ def geometric_censor(
 
         if _dist(cu, cv) <= r:
             H.add_edge(u, v, dist = _dist(cu, cv))
+        else:
+            if random.random() < p:
+                H.add_edge(u, v, dist = _dist(cu, cv))
 
     return H
 
@@ -529,6 +534,102 @@ def bethe_hessian(
     return Q, hard, node2idx, idx2node
 
 
+def dwpe(
+    H_obs                   : nx.Graph,
+    q                       : int,
+    *,
+    L                       : int   = 3,      # max walk length
+    alpha                   : float = 0.6,    # geometric decay for longer walks
+    weight_from_dist        : bool  = True,   # optional Gaussian edge re-weight
+    sigma_scale             : float = 1.0,    # bandwidth multiplier
+    random_state            : int   = 42,
+):
+    """
+    Distance-Weighted Path-Expansion (DWPE) spectral embedding.
+
+    Parameters
+    ----------
+    H_obs : nx.Graph
+        Observed (possibly weighted) sub-graph that DuoSpec provides each iteration.
+        If edges carry attribute 'dist', a Gaussian kernel is applied.
+    q : int
+        Expected number of communities.
+    L : int, optional
+        Maximum walk length used in the expansion.  L=2 or 3 is usually plenty.
+    alpha : float, optional
+        Geometric decay factor (0<alpha<1) penalising longer walks.
+    weight_from_dist : bool, optional
+        If True and edge attribute 'dist' exists, converts distances to weights.
+    sigma_scale : float, optional
+        Multiplier on the median distance to set the Gaussian bandwidth σ.
+    random_state : int, optional
+        KMeans reproducibility.
+
+    Returns
+    -------
+    Q    : (n,q) soft assignments (rows sum to 1)
+    hard : np.ndarray, shape (n,)
+        Hard labels = argmax(Q,1)
+    node2idx / idx2node : mapping <-> index
+    """
+
+    # ---------- node order ----------------------------------------------------
+    nodes      = list(H_obs.nodes())
+    node2idx   = {u: i for i, u in enumerate(nodes)}
+    idx2node   = {i: u for u, i in node2idx.items()}
+    n          = len(nodes)
+
+    # ---------- optional dist->weight conversion ------------------------------
+    if weight_from_dist:
+        d_vals = np.array([d.get("dist", 1.0) for _, _, d in H_obs.edges(data=True)])
+        sigma  = (np.median(d_vals) or 1.0) * sigma_scale
+        for u, v, d in H_obs.edges(data=True):
+            if "dist" in d:
+                d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
+            else:
+                d["weight"] = 1.0
+    else:
+        for _, _, d in H_obs.edges(data=True):
+            d["weight"] = d.get("weight", 1.0)
+
+    # ---------- sparse adjacency & weights ------------------------------------
+    A = nx.to_scipy_sparse_array(
+        H_obs, nodelist=nodes, format="csr", weight="weight", dtype=float
+    )
+
+    # ---------- Distance-Weighted Path Expansion -----------------------------
+    B = A.copy()                       # 1-step paths, unsuppressed
+    A_power = A.copy()
+
+    for ℓ in range(2, L + 1):
+        A_power = A_power @ A          # length-ℓ paths
+        B += (alpha ** (ℓ - 1)) * A_power  # geometric decay
+
+    # ---------- symmetric normalisation (like Laplacian) ----------------------
+    deg = np.array(B.sum(axis=1)).ravel()
+    D_inv_sqrt = diags(np.power(deg, -0.5, where=deg > 0))
+    S = D_inv_sqrt @ B @ D_inv_sqrt        # symmetric, PSD
+
+    # ---------- eigen-decomposition ------------------------------------------
+    k = q                                # top-q eigenvectors
+    ncv = 2 * min(n - 1, max(2*k + 1, k + 20))
+    vals, vecs = eigsh(S, k=k, which="LA", ncv=ncv)  # largest algebraic
+
+    # ---------- k-means & soft assignment ------------------------------------
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+
+    # Gaussian responsibility as in DuoSpec helpers
+    def _conf_from_center(z, centers, eps=1e-12):
+        dist2 = np.square(z[:, None, :] - centers[None, :, :]).sum(axis=2)
+        W = np.exp(-dist2 / (2 * np.var(z)))
+        W /= W.sum(axis=1, keepdims=True) + eps
+        return W
+
+    Q = _conf_from_center(vecs, mu)
+
+    return Q, hard, node2idx, idx2node
 def bethe_hessian_fast(
     H_obs                : nx.Graph,
     q                    : int,
@@ -939,6 +1040,90 @@ def morans(
     return Q, hard, node2idx, idx2node
 
 
+def geo_bethe_hessian(
+        H_obs, q, *,
+        gamma        = 0.3,
+        thresh_frac  = 0.02,
+        weight_from_dist = True,
+        sigma_scale  = 1.4826,
+        random_state = 0,
+):
+    """
+    Degree-corrected, geometry-aware Bethe–Hessian.
+    Returns Q, hard, node2idx, idx2node.
+    """
+    import numpy as np, networkx as nx, scipy.sparse as sp
+    from scipy.sparse import diags, csr_matrix
+    from scipy.sparse.linalg import eigsh
+    from sklearn.cluster import KMeans
+
+    # ---- node order --------------------------------------------------------
+    nodes  = list(H_obs.nodes())
+    n      = len(nodes)
+    n2i    = {u:i for i,u in enumerate(nodes)}
+    i2n    = {i:u for u,i in n2i.items()}
+
+    # ---- dist → weight -----------------------------------------------------
+    if weight_from_dist:
+        dvals = np.fromiter((d.get("dist",1.0)
+                             for _,_,d in H_obs.edges(data=True)), float)
+        mad   = np.median(np.abs(dvals - np.median(dvals))) or 1.0
+        sigma = mad * sigma_scale
+        for u,v,d in H_obs.edges(data=True):
+            d["weight"] = np.exp(-0.5*(d.get("dist",1.0)/sigma)**2)
+    for _,_,d in H_obs.edges(data=True):
+        d["weight"] = d.get("weight",1.0)
+
+    A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
+                                 weight="weight", format="csr")
+    # ---- path-2 completion -------------------------------------------------
+    if gamma>0:
+        A2 = A @ A
+        A2.setdiag(0); A2.eliminate_zeros()
+        if thresh_frac>0:
+            k = max(int(thresh_frac * A2.nnz), 1)
+            cut = np.partition(np.abs(A2.data), -k)[-k]
+            
+            # Convert to COO format which is easier to filter
+            A2_coo = A2.tocoo()
+            # Filter the data
+            mask = np.abs(A2_coo.data) >= cut
+            # Create a new filtered COO matrix and convert back to CSR
+            A2 = sp.coo_matrix(
+                (A2_coo.data[mask], (A2_coo.row[mask], A2_coo.col[mask])),
+                shape=A2.shape
+            ).tocsr()
+        A = A + gamma*A2
+
+    d = np.asarray(A.sum(axis=1)).ravel()
+    D_half_inv = diags(np.power(d, -0.5, where=d>0))
+
+    # ---- degree-corrected BH ----------------------------------------------
+    #  Ā = D^(-1/2) A D^(-1/2)  (symmetric)
+    Ahat = D_half_inv @ A @ D_half_inv
+    # r* per Saade+14 but on Ahat (mean degree =1), small ε for safety
+    r = np.sqrt((d**2).mean() / (d.mean()+1e-12) - 1)
+
+    I  = diags(np.ones(n))
+    Hr = (r*r - 1)*I - r*Ahat + diags(np.ones(n))
+
+    k  = q
+    ncv= 2*min(n-1, max(2*k+1, k+20))
+    _, vecs = eigsh(-Hr, k=k, which="LA", ncv=ncv)
+
+    km = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
+    hard = km.labels_
+    mu   = km.cluster_centers_
+
+    def conf(z,c):
+        d2 = ((z[:,None,:]-c[None,:,:])**2).sum(2)
+        W  = np.exp(-d2/(2*np.var(z)))
+        W /= W.sum(1, keepdims=True)+1e-12
+        return W
+    Q = conf(vecs, mu)
+    return Q, hard, n2i, i2n
+
+
 # ---------------------------------------------------------------------------
 # 4) SCORE community step  (soft confidence)
 # ---------------------------------------------------------------------------
@@ -996,6 +1181,8 @@ def get_callable(calls: Union[Tuple, str]):
         "morans":            morans,
         "score":             score,
         "bethe_hessian_fast": bethe_hessian_fast,
+        "dwpe":              dwpe,
+        "geo_bethe_hessian": geo_bethe_hessian,
     }
     if isinstance(calls, str):
         return (func_dict[calls], func_dict[calls])
@@ -1329,78 +1516,34 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
-    from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from community_detection.bp.vectorized_bp import belief_propagation, beta_param
-    a = 30
-    b = 5
-    n = 350
-    K = 2
-    r_in = np.sqrt(a * np.log(n) / n)
-    r_out = np.sqrt(b * np.log(n) / n)
-    print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
-    # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
-    G_true = generate_gbm(
-        n=n,
-        K=K,
-        a=a,
-        b=b,
+    G_true = generate_noisy_sbm(
+        n=900,
+        K=2,
+        p_in=0.7,
+        p_out=0.196,
+        sigma=0.5,
         seed=42
     )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
-    for u, v in G_true.edges():
-        G_true[u][v]["dist"] = np.linalg.norm(np.array(G_true.nodes[u]["coords"]) - np.array(G_true.nodes[v]["coords"]))
-    avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
-    print("avg_deg:", avg_deg)
-    original_density = avg_deg / len(G_true.nodes)
-    C = 0.8 * original_density
-    # print("C:", C)
-    def weight_func(c1, c2):
-        # return np.exp(-0.5 * get_coordinate_distance(c1, c2))
-        return 1.0
 
-    num_pairs = int(C * len(G_true.nodes) ** 2 / 2)
-    sampler = PairSamplingObservation(G_true, num_samples=num_pairs, weight_func=weight_func, seed=42)
-    observations = sampler.observe()
-
-    obs_nodes: Set[int] = set()
-    for p, d in observations:
-        obs_nodes.add(p[0])
-        obs_nodes.add(p[1])
-
-    # subG = create_dist_observed_subgraph(G_true.number_of_nodes(), observations)
-    subG = erdos_renyi_mask(G_true, 0.005, seed=42)
-    # subG = geometric_censor(G_true, 0.3, coord_key="coords")
-    # # print("Running Loopy BP …")
-    # beliefs, preds, node2idx, idx2node = belief_propagation(
-    #     subG,
-    #     q=K,
-    #     seed=42,
-    #     init="random",
-    #     msg_init="random",
-    #     max_iter=100000,
-    #     damping=0.15,   
-    #     balance_regularization=0.05,
-    # )
+    subG = geometric_censor(G_true, r=0.5, seed=42)
     
     res = duo_spec(
-        G_true,
-        K=K,
+        subG,
+        K=2,
+        config='bethe_hessian',
     )
+    # Q, preds, node2idx, idx2node = dwpe(
+    #     subG,
+    #     q=2,
+    #     random_state=42,
+    # )
     preds = res["communities"]
-
-    # labels = spectral_clustering(subG, q=K, seed=42)
-    # preds = np.array([labels[i] for i in range(len(labels))])
 
 
     true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
     stats = detection_stats(preds, true_labels)
-    # sub_preds = np.array([preds[i] for i in obs_nodes])
-    # sub_true_labels = np.array([true_labels[i] for i in obs_nodes])
-    # sub_stats = detection_stats(sub_preds, sub_true_labels)
+
     print("\n=== Community‑detection accuracy ===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")
-    # print("\n=== Subgraph community‑detection accuracy ===")
-    # for k, v in sub_stats.items():
-    #     print(f"{k:>25s} : {v}")

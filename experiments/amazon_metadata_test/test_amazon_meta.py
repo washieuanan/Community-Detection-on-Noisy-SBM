@@ -1,4 +1,4 @@
-from community_detection.bp.vectorized_geometric_bp import (
+from algorithms.bp.old.vectorized_geometric_bp import (
     belief_propagation,
     detection_stats,
     get_true_communities,
@@ -8,7 +8,7 @@ from community_detection.bp.vectorized_geometric_bp import (
 import numpy as np
 import networkx as nx
 
-from community_detection.bp.duo_bp import (
+from algorithms.bp.old.duo_bp import (
     duo_bp,
     create_dist_observed_subgraph,
 )
@@ -20,9 +20,7 @@ import os
 import json
 import logging
 import random
-from experiments.controls.motif_count import motif_counting
-from experiments.controls.spectral import spectral_clustering_community_detection
-from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
     for each coord, convert string formatted coord to numpy array
