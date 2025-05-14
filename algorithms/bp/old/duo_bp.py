@@ -13,6 +13,7 @@ from algorithms.bp.vectorized_bp import spectral_clustering
 from block_models.gbm import generate_graph
 from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
 from algorithms.bp.vectorized_bp import belief_propagation, beta_param
+from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from collections import defaultdict
 from copy import deepcopy
 
