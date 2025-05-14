@@ -3,7 +3,7 @@ import numpy as np
 import itertools
 from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
-from block_models.cbsm.sbm import generate_noisy_sbm
+from block_models.sbm.sbm import generate_noisy_sbm
 from algorithms.duo_spec import detection_stats, get_true_communities
 from typing import List, Tuple, Any
 
