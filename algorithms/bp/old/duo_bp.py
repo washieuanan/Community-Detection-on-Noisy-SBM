@@ -8,11 +8,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
-from community_detection.bp.vectorized_bp import spectral_clustering
-from experiments.graph_generation.gbm import generate_gbm
+from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from algorithms.bp.vectorized_bp import spectral_clustering
+from block_models.gbm import generate_graph
 from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-from community_detection.bp.vectorized_bp import belief_propagation, beta_param
+from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from collections import defaultdict
 from copy import deepcopy
 
