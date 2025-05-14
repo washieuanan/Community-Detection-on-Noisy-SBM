@@ -10,7 +10,7 @@ from typing import Tuple
 from tqdm import tqdm
 
 # Adjust these imports to match your project structure
-from observations import random_walk_obs, sensor_observe, standard_observe
+from deprecated.observations import random_walk_obs, sensor_observe, standard_observe
 
 # JSON serializer helper for numpy types
 def _json_convert(o):

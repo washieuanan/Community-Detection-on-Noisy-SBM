@@ -11,12 +11,12 @@ import numpy as np
 
 # Import both BP implementations
 # from community_detection.bp.tests.bethe_duo_bp import duo_bp as bethe_bp
-from community_detection.bp.tests.duo_bp import duo_bp as duo_bp
+from community_detection.bp.duo_bp import duo_bp
 from community_detection.bp.vectorized_bp import get_true_communities
-from community_detection.bp.tests.duo_bp import create_dist_observed_subgraph
+from community_detection.bp.duo_bp import create_dist_observed_subgraph
 from community_detection.bp.vectorized_bp import belief_propagation
-from controls.motif_count import motif_counting
-from controls.spectral import spectral_clustering
+from experiments.controls.motif_count import motif_counting
+from experiments.controls.spectral import spectral_clustering
 from algorithms.duo_spec import duo_spec, detection_stats, bethe_hessian
 # from controls.spectral import bethe_hessian_clustering
 

@@ -1,14 +1,12 @@
-import json
 import os
-
-import numpy as np 
+import json
 import networkx as nx
 from networkx.readwrite import json_graph
-
-
-from graph_generation.gbm import generate_gbm
-from observations.standard_observe import get_coordinate_distance
-from observations.standard_observe import PairSamplingObservation
+import numpy as np
+from typing import List, Tuple, Any
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import get_coordinate_distance
+from deprecated.observations.standard_observe import PairSamplingObservation
 
 
 
