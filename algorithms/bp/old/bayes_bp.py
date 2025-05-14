@@ -12,6 +12,31 @@ from scipy.stats import qmc
 from typing import Literal
 import matplotlib.pyplot as plt
 import networkx as nx
+from __future__ import annotations
+from typing import Dict, List, Tuple
+import scipy.sparse.linalg as sla
+from sklearn.metrics import accuracy_score, confusion_matrix
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import permutation_test, mode
+from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
+
+if __name__ == "__main__":
+    from experiments.graph_generation.gbm import generate_gbm
+    import numpy as np
+    from mpl_toolkits.mplot3d import Axes3D
+    from deprecated.observations.standard_observe import (
+        PairSamplingObservation,
+        get_coordinate_distance,
+    )
+    from deprecated.observations.sensor_observe import GroupedMultiSensorObservation
+    from community_detection.bp.vectorized_geometric_bp import detection_stats, belief_propagation, get_true_communities
+    from community_detection.bp.gbm_bp import create_observed_subgraph
+
 class BayesianGraphInference():
     """Inference on the latent space of a graph using Bayesian methods."""
     
@@ -199,25 +224,6 @@ class BayesianGraphInference():
                     G.add_edge(i, j)
         return G
     
-if __name__ == "__main__":
-
-    from graph_generation.gbm import generate_gbm
-    import numpy as np
-
-
-    from mpl_toolkits.mplot3d import Axes3D
-
-
-    from observations.standard_observe import (
-        PairSamplingObservation,
-        get_coordinate_distance,
-    )
-
-    from observations.sensor_observe import GroupedMultiSensorObservation
-    from community_detection.bp.vectorized_geometric_bp import detection_stats, belief_propagation, get_true_communities
-    from community_detection.bp.gbm_bp import (create_observed_subgraph)
-
-
     G2 = generate_gbm(n=500, K=3, a = 100, b = 50, seed=123)
     avg_deg = np.mean([G2.degree[n] for n in G2.nodes()])
     orig_sparsity = avg_deg/len(G2.nodes)

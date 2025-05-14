@@ -1,26 +1,18 @@
-# imports 
-
-from experiments.community_detection.bp.belief_prop import (
-    detection_stats,
-    initialize_beliefs,
-    get_marginals_and_preds,
-    belief_propagation,
-    get_sbm,
-    get_true_communities
-)
-
-from experiments.graph_generation.generate_graph import (
-    generate_latent_geometry_graph,
-    NUM_VERTICES_CLUSTER_1,
-    NUM_VERTICES_CLUSTER_2,
-)
-
-# from experiments.observations.observe import get_coordinate_distance
-import numpy as np
+from __future__ import annotations
+from typing import Dict, List, Tuple, Literal
 import networkx as nx
-
-from experiments.observations.random_walk_obs import random_walk_observations
-from experiments.observations.sensor_observe import sensor_observations, gather_multi_sensor_observations, pick_sensors
+import numpy as np
+import scipy.sparse.linalg as sla
+from sklearn.cluster import KMeans
+from sklearn.metrics import accuracy_score, confusion_matrix
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import permutation_test, mode
+from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 
 def get_unique_edges(obs):
     """
@@ -78,7 +70,6 @@ def create_observed_subgraph(num_coords, observations):
 
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
     # Generate a graph with two clusters
     # distributions = ['normal', 'normal', 'normal']
     # dist_params = [

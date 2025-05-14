@@ -1,10 +1,22 @@
-import numpy as np
+from __future__ import annotations
+from typing import Dict, List, Tuple, Literal
 import networkx as nx
-import scipy
+import numpy as np
+import scipy.sparse.linalg as sla
+from sklearn.cluster import KMeans
+from sklearn.metrics import accuracy_score, confusion_matrix
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import permutation_test, mode
+from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 from scipy.stats import qmc
 from scipy.spatial import distance
 from sklearn.utils.extmath import row_norms
-from typing import Literal, Tuple, List, Dict, Set
+from typing import Set
 
 
 class BayesianGraphInference:
@@ -240,14 +252,6 @@ class BayesianGraphInference:
 
 
 if __name__ == "__main__":
-    from graph_generation.gbm import generate_gbm
-    from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from community_detection.bp.vectorized_geometric_bp import (
-        belief_propagation,
-        detection_stats,
-        get_true_communities,
-    )
-
     # Generate latent GBM graph
     G_true = generate_gbm(n=500, K=3, a=100, b=50, seed=123)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])

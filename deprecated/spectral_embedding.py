@@ -1,4 +1,3 @@
-
 from typing import List, Tuple, Any
 
 import networkx as nx
@@ -6,10 +5,10 @@ import numpy as np
 from scipy.sparse import csgraph
 from sklearn.cluster import KMeans
 
-from graph_generation.generate_graph import generate_latent_geometry_graph
-from observations.random_walk_obs import random_walk_observations
-from observations.standard_observe import get_coordinate_distance
-from ..algorithms.detect import Detection
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.random_walk_obs import random_walk_observations
+from deprecated.observations.standard_observe import get_coordinate_distance
+from algorithms.detect import Detection
 
 
 #pylint: disable=redefined-outer-name
@@ -187,7 +186,7 @@ if __name__ == "__main__":
     def prob_weight_func(dist):
         return max(np.exp(-0.6 * dist), 0.1)
     
-    G2, coords2, cluster_map2 = generate_latent_geometry_graph(
+    G2, coords2, cluster_map2 = generate_gbm(
         [40, 40, 40], 
         distributions=distributions,
         dist_params=dist_params,

@@ -3,15 +3,7 @@ import networkx as nx
 import numpy as np
 
 from .observe import Observation
-from experiments.graph_generation.generate_graph import distance_function
-
-
-from typing import List, Tuple, Optional, Any
-import networkx as nx
-import numpy as np
-
-from .observe import Observation
-from graph_generation.generate_graph import distance_function
+from experiments.graph_generation.gbm import generate_gbm
 
 def random_walk_observations(G, num_walkers, num_steps=5, stopping_param = None, leaky=0.0, seed=0, return_groups=False):
     """
@@ -97,7 +89,7 @@ class RandomWalkObservation(Observation):
         num_steps : int
             Fixed number of steps per walker (unless stopping_param is set).
         stopping_param : float or None
-            If not None, we sample each walk’s length ~ Geometric(stopping_param).
+            If not None, we sample each walk's length ~ Geometric(stopping_param).
         leaky : float in [0,1]
             Probability a walker fails to record any given edge.
         """
@@ -156,8 +148,8 @@ if __name__ == "__main__":
     # observations_ = random_walk_observations(G, num_walkers=10, num_steps=5, stopping_param = 0.1, leaky=0.1)
     # print(observations_)
 
-    from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
-    G, coords, _ = generate_latent_geometry_graph([50,50], connectivity_threshold=0.8)
+    from experiments.graph_generation.gbm import generate_gbm
+    G, coords, _ = generate_gbm([50,50], connectivity_threshold=0.8)
 
     # instantiate
     rw = RandomWalkObservation(
@@ -260,7 +252,7 @@ if __name__ == "__main__":
 #         num_steps : int
 #             Fixed number of steps per walker (unless stopping_param is set).
 #         stopping_param : float or None
-#             If not None, we sample each walk’s length ~ Geometric(stopping_param).
+#             If not None, we sample each walk's length ~ Geometric(stopping_param).
 #         leaky : float in [0,1]
 #             Probability a walker fails to record any given edge.
 #         """
@@ -322,8 +314,8 @@ if __name__ == "__main__":
 #     # observations_ = random_walk_observations(G, num_walkers=10, num_steps=5, stopping_param = 0.1, leaky=0.1)
 #     # print(observations_)
 
-#     from experiments.graph_generation.generate_graph import generate_latent_geometry_graph
-#     G, coords, _ = generate_latent_geometry_graph([50,50], connectivity_threshold=0.8)
+#     from experiments.graph_generation.gbm import generate_gbm
+#     G, coords, _ = generate_gbm([50,50], connectivity_threshold=0.8)
 
 #     # instantiate
 #     rw = RandomWalkObservation(

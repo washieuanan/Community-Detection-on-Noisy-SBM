@@ -1,4 +1,4 @@
-from experiments.community_detection.bp.vectorized_geometric_bp import (
+from community_detection.bp.vectorized_geometric_bp import (
     get_true_communities,
     belief_propagation,
     detection_stats
