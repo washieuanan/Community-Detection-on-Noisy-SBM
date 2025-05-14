@@ -8,10 +8,10 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
-from community_detection.bp.vectorized_bp import spectral_clustering
+from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from algorithms.bp.vectorized_bp import spectral_clustering
 from collections import defaultdict
-from community_detection.bp.duo_bp import duo_bp
+from algorithms.bp.old.duo_bp import duo_bp
 from copy import deepcopy
 from scipy.sparse import diags
 from sklearn.cluster import KMeans
@@ -27,11 +27,12 @@ import math
 from copy import deepcopy
 from typing import Hashable, Iterable
 from numpy.random import default_rng
-from experiments.graph_generation.gbm import generate_gbm
+from block_models.gbm import generate_graph 
 from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-from community_detection.bp.vectorized_bp import belief_propagation, beta_param
+from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from sklearn.neighbors import KernelDensity
-from scipy.linalg import eigh
+
+from algorithms.spectral_ops.attention import byoe_embedding, multihead_spectral_embedding, motif_spectral_embedding_vec
 # censoring schemes
 # ---------------------------------------------------------------------
 # 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
@@ -528,6 +529,156 @@ def bethe_hessian(
 
     return Q, hard, node2idx, idx2node
 
+def hybrid_bethe_dirichlet(
+    H_obs               : nx.Graph,
+    q                   : int,
+    *,
+    p_same_key          : str   = "p_same",     # edge-attr key ⇢ community score ∈ [0,1]
+    g_geo_key           : str   = "g_geo",      # edge-attr key ⇢ geometry  score ∈ [0,1]
+    tau                 : float = 0.15,         # geometry-suppression coefficient
+    weight_from_dist    : bool  = True,
+    sigma_scale         : float = 1.0,
+    random_state        : int   = 42,
+):
+    """
+    Hybrid Bethe–Dirichlet spectral embedding (one-shot DUOSPEC variant).
+
+    Parameters
+    ----------
+    H_obs : nx.Graph
+        Observed (possibly masked) graph.  Edges should carry:
+            • p_same_key : P(edge is within-community)  ∈ [0,1]
+            • g_geo_key  : P(edge is geometric noise)   ∈ [0,1]
+            • dist       : (optional) latent distance   (for weight_from_dist)
+    q : int
+        Number of clusters / communities.
+    tau : float
+        Amount of geometry suppression  (0 ⇒ ignore g_geo, 1 ⇒ full subtraction).
+    weight_from_dist, sigma_scale
+        Same semantics as in `bethe_hessian`.
+
+    Returns
+    -------
+    Q      : (n,q) soft cluster confidence (rows sum to 1)
+    hard   : (n,)  hard labels 0..q-1  (argmax rows of Q)
+    node2idx / idx2node : mapping helpers
+    """
+    # ---------- node order ----------------------------------------------------
+    nodes      = list(H_obs.nodes())
+    node2idx   = {u: i for i, u in enumerate(nodes)}
+    idx2node   = {i: u for u, i in node2idx.items()}
+    n          = len(nodes)
+
+    # ---------- optional weight from 'dist' -----------------------------------
+    if weight_from_dist:
+        d_vals = np.array([d.get("dist", 1.0) for *_, d in H_obs.edges(data=True)])
+        sigma  = (np.median(d_vals) or 1.0) * sigma_scale
+        for u, v, d in H_obs.edges(data=True):
+            d["weight"] = np.exp(-0.5 * (d.get("dist", 0.0) / sigma) ** 2)
+    else:
+        for *_, d in H_obs.edges(data=True):
+            d.setdefault("weight", 1.0)
+
+    # ---------- edge weights  w_uv  -------------------------------------------
+    # w_uv =  (p_same - tau * g_geo) *  base_weight
+    for u, v, d in H_obs.edges(data=True):
+        p_same = d.get(p_same_key, 0.0)
+        g_geo  = d.get(g_geo_key,  0.0)
+        base   = d["weight"]
+        signal        = max(0.0, p_same - tau * g_geo)         # ⬅ clip
+        d["w_hybrid"] = signal * base
+        # d["w_hybrid"] = (p_same - tau * g_geo) * base
+
+    # ---------- sparse matrices ------------------------------------------------
+    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
+                                   format="csr", weight="w_hybrid")
+    deg = np.asarray(A.sum(axis=1)).ravel()
+    D   = diags(deg)
+
+    # ---------- Bethe radius  r  (Saade et al. 2015 heuristic) -----------------
+    m      = A.nnz // 2
+    avg_d  = deg.mean()
+    r      = np.sqrt(avg_d / max(avg_d - 2 * m / n, 1e-8))
+
+    # ---------- Hybrid operator  H(r,tau) -------------------------------------
+    I  = diags(np.ones(n))
+    Hr = (r * r - 1.0) * I - r * D + A
+
+    # ---------- eigendecomposition --------------------------------------------
+    k   = q + 1                      # grab one extra for safety
+    ncv = 2 * min(n - 1, max(2 * k + 1, k + 20))
+    vals, vecs = eigsh(-Hr, k=q, which="LA", ncv=ncv, tol=1e-5)
+
+    # ---------- k-means + soft confidence -------------------------------------
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+    Q     = _conf_from_center(vecs, mu)          # ← your existing helper
+
+    return Q, hard, node2idx, idx2node
+
+from scipy.sparse import eye, diags, csr_matrix, linalg as spla
+from sklearn.cluster import KMeans
+
+def ppr_proj(
+    H_obs        : nx.Graph,
+    q            : int,
+    *,
+    alpha        : float = 0.3,
+    beta         : float = 0.40,
+    random_state : int   = 42,
+):
+    """
+    Spectral embedding based on Projected Personalized-PageRank (PPR-Proj).
+
+    Returns
+    -------
+    Q      : (n,q) soft cluster confidence (rows sum to 1)
+    hard   : (n,)  hard labels
+    node2idx / idx2node : mapping helpers
+    """
+    # ---- node order ---------------------------------------------------------
+    nodes      = list(H_obs.nodes())
+    node2idx   = {u:i for i,u in enumerate(nodes)}
+    idx2node   = {i:u for u,i in node2idx.items()}
+    n          = len(nodes)
+
+    # ---- sparse adjacency (unweighted) --------------------------------------
+    A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
+                                 format="csr", weight=None)
+    deg = np.asarray(A.sum(axis=1)).ravel()
+    deg_safe = deg.copy()
+    deg_safe[deg_safe == 0] = 1          # prevent division by zero
+    Dinv = sp.diags(1.0 / deg_safe)
+
+    # ---- truncated PPR kernel  ---------------------------------------------
+    # Y = (1-α) D⁻¹ A   (row-stochastic)
+    Y = (1.0 - alpha) * Dinv @ A
+    X = alpha * sp.eye(n, format="csr")          # 0-hop
+    X = X + Y                                    # 1-hop
+    X = X + Y @ Y                                # 2-hop
+    X = X + Y @ Y @ Y                            # 3-hop   (⟹ good for log-degree)
+
+    # degree-normalise:   K̃ = D^{-1/2} X D^{-1/2}
+    dinv_sqrt = sp.diags(1.0 / np.sqrt(deg_safe))
+    Ktil = dinv_sqrt @ X @ dinv_sqrt
+
+    # ---- Projected operator  H = (1-β)K̃ + β K̃² -----------------------------
+    H = (1.0 - beta) * Ktil + beta * (Ktil @ Ktil)
+
+    # ---- top-q eigenvectors  (largest algebraic) ---------------------------
+    k   = q                     # we only need q vectors
+    ncv = 2 * min(n - 1, max(2 * k + 1, k + 20))
+    vals, vecs = spla.eigsh(H, k=q, which="LA", ncv=ncv, tol=1e-4)
+
+    # ---- k-means & confidence ----------------------------------------------
+    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
+    hard  = km.labels_
+    mu    = km.cluster_centers_
+    Q     = _conf_from_center(vecs, mu)       # your existing helper
+
+    return Q, hard, node2idx, idx2node
+
 
 def bethe_hessian_fast(
     H_obs                : nx.Graph,
@@ -996,6 +1147,11 @@ def get_callable(calls: Union[Tuple, str]):
         "morans":            morans,
         "score":             score,
         "bethe_hessian_fast": bethe_hessian_fast,
+        'hybrid_bethe_dirichlet': hybrid_bethe_dirichlet, 
+        'ppr_proj': ppr_proj, 
+        'byoe_embedding': byoe_embedding,
+        'multihead': multihead_spectral_embedding, 
+        'motif': motif_spectral_embedding_vec 
     }
     if isinstance(calls, str):
         return (func_dict[calls], func_dict[calls])
@@ -1329,22 +1485,23 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
+    from block_models.sbm.sbm import generate_noisy_sbm
     from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from community_detection.bp.vectorized_bp import belief_propagation, beta_param
+    from algorithms.bp.vectorized_bp import belief_propagation, beta_param
     a = 30
     b = 5
-    n = 350
-    K = 2
+    n = 1000
+    K = 3
     r_in = np.sqrt(a * np.log(n) / n)
     r_out = np.sqrt(b * np.log(n) / n)
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
-    G_true = generate_gbm(
-        n=n,
+    G_true = generate_noisy_sbm(
+        n=900,
         K=K,
-        a=a,
-        b=b,
+        p_in=0.566,
+        p_out=0.196,
+        sigma=0.4, 
         seed=42
     )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
@@ -1378,7 +1535,7 @@ if __name__ == "__main__":
     #     seed=42,
     #     init="random",
     #     msg_init="random",
-    #     max_iter=100000,
+    #     max_iter=100000,3
     #     damping=0.15,   
     #     balance_regularization=0.05,
     # )
@@ -1386,6 +1543,7 @@ if __name__ == "__main__":
     res = duo_spec(
         G_true,
         K=K,
+        config='motif'
     )
     preds = res["communities"]
 
