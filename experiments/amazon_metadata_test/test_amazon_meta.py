@@ -21,6 +21,8 @@ import json
 import logging
 import random
 from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from algorithms.spectral_ops.attention import motif_spectral_embedding
+
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
     for each coord, convert string formatted coord to numpy array
