@@ -10,8 +10,9 @@ from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
 from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 from algorithms.bp.vectorized_bp import spectral_clustering
-from block_models.gbm.gbm import generate_gbm
+from block_models.gbm import generate_graph
 from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from collections import defaultdict
 from copy import deepcopy
