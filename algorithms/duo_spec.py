@@ -8,9 +8,10 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
+from community_detection.bp.duo_bp import duo_bp
 from copy import deepcopy
 from scipy.sparse import diags
 from sklearn.cluster import KMeans
@@ -26,7 +27,9 @@ import math
 from copy import deepcopy
 from typing import Hashable, Iterable
 from numpy.random import default_rng
-from experiments.community_detection.bp.duo_bp import duo_bp
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 from sklearn.neighbors import KernelDensity
 from scipy.linalg import eigh
 # censoring schemes
@@ -293,7 +296,7 @@ def kl_refine(G, labels):
             # Δscore if we flip to the other block
             delta = sum(d["weight"]*(labels[v]==cur) for v,d in G[u].items()) \
                   - sum(d["weight"]*(labels[v]!=cur) for v,d in G[u].items())
-            if delta < 0:  # flipping lowers “cut” → better clustering
+            if delta < 0:  # flipping lowers "cut" → better clustering
                 labels[u] = 1-cur
                 improved = True
     return labels
@@ -1327,8 +1330,8 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
 
 if __name__ == "__main__":
     from experiments.graph_generation.gbm import generate_gbm
-    from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
+    from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+    from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     a = 30
     b = 5
     n = 350

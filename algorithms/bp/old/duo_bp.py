@@ -8,9 +8,12 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
 
 # def belief_propagation(
@@ -387,9 +390,6 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from experiments.graph_generation.gbm import generate_gbm
-    from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-    from experiments.community_detection.bp.vectorized_bp import belief_propagation, beta_param
     a = 125
     b = 10
     n = 800

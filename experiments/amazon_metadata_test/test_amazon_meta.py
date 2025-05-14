@@ -1,15 +1,16 @@
-from experiments.community_detection.bp.vectorized_geometric_bp import (
+from community_detection.bp.vectorized_geometric_bp import (
+    belief_propagation,
+    detection_stats,
     get_true_communities,
-    detection_stats
 )
 # from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
 
 import numpy as np
 import networkx as nx
 
-from experiments.community_detection.bp.duo_bp import (
+from community_detection.bp.duo_bp import (
+    duo_bp,
     create_dist_observed_subgraph,
-    duo_bp
 )
 # from experiments.community_detection.bp.bethe_duo_bp import (
 #     duo_bp
@@ -21,7 +22,7 @@ import logging
 import random
 from experiments.controls.motif_count import motif_counting
 from experiments.controls.spectral import spectral_clustering_community_detection
-from experiments.community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
     for each coord, convert string formatted coord to numpy array
@@ -127,7 +128,7 @@ if __name__ == "__main__":
         # connect consecutive nodes in the shuffled list
         return [(nodes[i], nodes[i+1]) for i in range(len(nodes)-1)]
 
-    # … after you’ve built G_bp …
+    # … after you've built G_bp …
 
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")

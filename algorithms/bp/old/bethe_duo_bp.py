@@ -8,10 +8,14 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import permutation_test, mode
 from scipy.sparse import coo_matrix, csr_matrix, linalg as splinalg
-from experiments.community_detection.bp.tests.bethe_bp import belief_propagation
+from community_detection.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
+from community_detection.bp.vectorized_bp import spectral_clustering
+from experiments.graph_generation.gbm import generate_gbm
+from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
+from community_detection.bp.vectorized_bp import belief_propagation, beta_param
 from collections import defaultdict
-from experiments.community_detection.bp.vectorized_bp import spectral_clustering
 from copy import deepcopy
+from typing import Set
 
 # def belief_propagation(
 #         G: nx.Graph,
@@ -224,7 +228,7 @@ def duo_bp(
     # ---------------- algorithmic knobs ----------------
     max_em_iters         : int   = 50,
     anneal_steps         : int   = 6,     # how many EM rounds to ramp-up λ
-    warmup_rounds        : int   = 2,     # pure “E” rounds (no pruning)
+    warmup_rounds        : int   = 2,     # pure "E" rounds (no pruning)
     comm_cut             : float = 0.90,  # percentile threshold
     geo_cut              : float = 0.90,
     shrink_comm          : float = 1.00,
@@ -287,7 +291,7 @@ def duo_bp(
         thresh_comm = np.percentile(p_same, comm_cut * 100)
         mask_comm   = p_same > thresh_comm
 
-        # -------------------- Geometry (“balls”) --------------------------------
+        # -------------------- Geometry ("balls") --------------------------------
         bel_g, _, n2i_g, _ = belief_propagation(
             subG, q=num_balls,  **bp_kwargs
         )
@@ -387,7 +391,7 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     return arr
 
 if __name__ == "__main__":
-    from graph_generation.gbm import generate_gbm_poisson
+    from experiments.graph_generation.gbm import generate_gbm
     from observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from community_detection.bp.vectorized_bp import belief_propagation, beta_param
     from typing import Set
@@ -398,7 +402,7 @@ if __name__ == "__main__":
     r_in = a * np.log(n) / n
     r_out = b * np.log(n) / n
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
-    G_true = generate_gbm_poisson(lam=20, K=K, a=a, b=b, seed=42)
+    G_true = generate_gbm(lam=20, K=K, a=a, b=b, seed=42)
     avg_deg = np.mean([G_true.degree[n] for n in G_true.nodes()])
     original_density = avg_deg / len(G_true.nodes)
     C = 0.01      * original_density
