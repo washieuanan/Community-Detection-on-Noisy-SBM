@@ -173,7 +173,7 @@ if __name__ == "__main__":
     from collections import defaultdict
     # Example usage
     products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
-    G = build_category_graph(products, subsampled_classes=['Book','Music'])
+    G = build_category_graph(products, subsampled_classes=['Video', 'DVD'])
     def subsample_equal_connected(G, desired_n=1000, class_attr='comm', seed=None):
         rng = random.Random(seed)
 
@@ -252,7 +252,7 @@ if __name__ == "__main__":
 
     # keep_nodes = books_sample.union(music_sample, video_sample, dvd_sample)
     # G = G.subgraph(keep_nodes).copy()
-    G = subsample_equal_connected(G, desired_n=2000, class_attr='comm', seed=123)
+    # G = subsample_equal_connected(G, desired_n=2000, class_attr='comm', seed=123)
     print("Number of nodes:", G.number_of_nodes())
     print("Graph is connected:", nx.is_connected(G))
 
@@ -269,7 +269,7 @@ if __name__ == "__main__":
             coords = G.nodes[node]['coords']
             G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-    nx.write_gml(G, 'amazon_metadata_test/amz_bookmusic.gml')
+    nx.write_gml(G, 'amazon_metadata_test/amz_allviddvd.gml')
     # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
     
     # node_info = G.nodes['0']['coords']

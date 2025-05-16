@@ -199,6 +199,84 @@ def combine_processed_graphs(processed_graphs: List[nx.Graph], original_graph: n
     
     return combined_G
 
+def sample_subgraph(G: nx.Graph, size: int = 1000) -> nx.Graph:
+    """
+    Sample a connected subgraph of approximately the given size from G.
+    
+    Parameters:
+    -----------
+    G : nx.Graph
+        Input graph to sample from
+    size : int
+        Approximate size of the subgraph to sample
+        
+    Returns:
+    --------
+    nx.Graph
+        A connected subgraph of G
+    """
+    if len(G) <= size:
+        return G.copy()
+    
+    # Start from a random node
+    start_node = random.choice(list(G.nodes()))
+    subgraph_nodes = {start_node}
+    frontier = list(G.neighbors(start_node))
+    
+    # Grow the subgraph by adding neighbors
+    while len(subgraph_nodes) < size and frontier:
+        # Pop a random node from the frontier
+        idx = random.randrange(len(frontier))
+        node = frontier.pop(idx)
+        
+        if node not in subgraph_nodes:
+            subgraph_nodes.add(node)
+            # Add neighbors to frontier
+            for neighbor in G.neighbors(node):
+                if neighbor not in subgraph_nodes:
+                    frontier.append(neighbor)
+    
+    # Extract the subgraph
+    subgraph = G.subgraph(subgraph_nodes).copy()
+    
+    # Ensure the subgraph is connected
+    if not nx.is_connected(subgraph):
+        # Get the largest connected component
+        largest_cc = max(nx.connected_components(subgraph), key=len)
+        subgraph = subgraph.subgraph(largest_cc).copy()
+    
+    return subgraph
+
+def update_base_graph_weights(base_graph: nx.Graph, processed_graph: nx.Graph, node_mapping: dict) -> nx.Graph:
+    """
+    Update the weights in the base graph using weights from a processed graph.
+    
+    Parameters:
+    -----------
+    base_graph : nx.Graph
+        Base graph to update
+    processed_graph : nx.Graph
+        Processed graph with new weights
+    node_mapping : dict
+        Dictionary mapping processed graph node IDs to base graph node IDs
+        
+    Returns:
+    --------
+    nx.Graph
+        Updated base graph
+    """
+    # Update edges that exist in the processed graph
+    for u, v, data in processed_graph.edges(data=True):
+        orig_u = node_mapping[u]
+        orig_v = node_mapping[v]
+        
+        if base_graph.has_edge(orig_u, orig_v):
+            # Get weight from processed graph
+            weight = data.get('weight', 1.0)
+            base_graph.edges[orig_u, orig_v]['weight'] = weight
+    
+    return base_graph
+
 if __name__ == "__main__":
     # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
     print("Loading graph")
@@ -207,56 +285,92 @@ if __name__ == "__main__":
     
     print(f"Original graph has {len(G)} nodes and {len(G.edges())} edges")
     
-    # # Split graph into patches
-    patches, node_mapping = split_graph_into_patches(G, patch_size=2000)
-    print(f"Split graph into {len(patches)} patches")
-    print(f"Node mapping contains {len(node_mapping)} nodes")
+    # Initialize base graph with same structure as G
+    base_graph = G.copy()
+    # Initialize all edges with weight 1.0 if no weight exists
+    for u, v in base_graph.edges():
+        if 'weight' not in base_graph.edges[u, v]:
+            base_graph.edges[u, v]['weight'] = 1.0
+    
+    # Parameters for patch sampling
+    P = 500  # Number of patches to sample
+    m = 1000  # Size of each patch
     
     duo_params = dict(
         K               = 2,                    # number of communities
         num_balls       = 32,                   # finer geometry embedding
         config          = "motif",              # geometry estimator
-        max_em_iters    = 20,                  # allow more EM steps
-        warmup_rounds   = 1,                    # hold off on any re-weighting
-        anneal_steps    = 10,                   # then ramp λ from 0→full over 30 iter
-        tol             = 1e-3,
-        shrink_geo      = 0.7,
-        boost_geo       = 0.5,
-        patience        = 5,
+        max_em_iters    = 50,                  # allow more EM steps
+        warmup_rounds   = 2,                    # hold off on any re-weighting
+        anneal_steps    = 20,                   # then ramp λ from 0→full over 30 iter
+        tol             = 1e-4,
+        shrink_geo      = 0.9,
+        boost_geo       = 0.3,
+        patience        = 10,
         random_state    = 42,
-        spec_params   = dict(
-            dim       = 64,
-            walk_len  = 60,
-            num_walks = 20,
-            window    = 5,
+        spec_params = dict(
+            dim = 3,
+            walk_len = 3,
+            num_walks = 3,
+            window = 5,
         )
     )
     
-    # Process each patch
-    processed_graphs = []
-    for i, patch in enumerate(patches):
-        print(f"Processing patch {i+1}/{len(patches)} with {len(patch)} nodes")
-        res = duo_spec(patch, **duo_params)
-        processed_graphs.append(res["G_final"])
-        print(f"Processed patch has {len(res['G_final'])} nodes")
+    # Iteratively sample and process patches
+    for i in range(P):
+        print(f"Processing patch {i+1}/{P}")
+        
+        # Sample a subgraph from the original graph
+        patch = sample_subgraph(G, size=m)
+        print(f"Sampled patch has {len(patch)} nodes and {len(patch.edges())} edges")
+        
+        # Create node mapping from patch to original graph
+        node_mapping = {i: node for i, node in enumerate(patch.nodes())}
+        
+        # Create a version of the patch that takes weights from base_graph
+        weighted_patch = nx.Graph()
+        for u, v in patch.edges():
+            weight = base_graph.edges[u, v].get('weight', 1.0)
+            weighted_patch.add_edge(u, v, weight=weight)
+        
+        # Add node attributes
+        for n in patch.nodes():
+            weighted_patch.add_node(n, **patch.nodes[n])
+        
+        # Relabel to integers starting from 0
+        weighted_patch = nx.convert_node_labels_to_integers(weighted_patch)
+        reverse_mapping = {i: old for i, old in enumerate(patch.nodes())}
+        
+        # Process the patch
+        res = duo_spec(weighted_patch, **duo_params)
+        processed_patch = res["G_final"]
+        
+        # Update base graph with new weights
+        base_graph = update_base_graph_weights(
+            base_graph, 
+            processed_patch, 
+            {n: reverse_mapping[n] for n in processed_patch.nodes()}
+        )
+        
+        # Print statistics on weights
+        weights = [data['weight'] for _, _, data in base_graph.edges(data=True)]
+        if weights:
+            print(f"Edge weight stats after patch {i+1} - Min: {min(weights):.6f}, Max: {max(weights):.6f}, Mean: {sum(weights)/len(weights):.6f}")
     
-    # Combine processed graphs while preserving original structure
-    G_combined = combine_processed_graphs(processed_graphs, G, node_mapping)
-    print(f"Combined graph has {len(G_combined)} nodes and {len(G_combined.edges())} edges")
-    print(f"Original graph had {len(G)} nodes and {len(G.edges())} edges")
+    print(f"Final base graph has {len(base_graph)} nodes and {len(base_graph.edges())} edges")
     
-    # Run belief propagation on combined graph
+    # Run belief propagation on the final weighted graph
     _, preds, _, _ = belief_propagation_weighted(
-        G_combined, 
+        base_graph, 
         q=2, 
         max_iter=10000,
     )
-    # _, preds, _, _ = belief_propagation(G, q=2, max_iter=10000)
+    
     # Get detection stats
     true_communities = get_true_communities(G, attr="comm")
     stats = detection_stats(preds, true_communities)
     print(stats)
-    print(f"Finished detection stats")             
+    print(f"Finished detection stats")
         
             
         

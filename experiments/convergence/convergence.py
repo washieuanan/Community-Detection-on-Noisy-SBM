@@ -98,7 +98,7 @@ def _geometric_noise(
     dist = np.linalg.norm(coords[u_idx] - coords[v_idx], axis=1)
 
     # fit p̂(d) and residuals
-    p_hat, _ = _fit_regression(dist, conf)
+    p_hat, reg = _fit_regression(dist, conf)
     resid = conf - p_hat
     mse = (resid**2).mean()
 
@@ -116,7 +116,7 @@ def _geometric_noise(
             d_b = dist[~same].mean()
             gbc = d_b / d_w if d_w else 1.0
 
-    return dict(gn_mse=mse, gn_dev=dev, gbc=gbc)
+    return dict(gn_mse=mse, gn_dev=dev, gbc=gbc, gn_slope=reg.coef_[0])
 
 
 def noise_has_converged(history, metric="gn_mse", *, window=3, tol=1e-4):
@@ -233,7 +233,7 @@ def duo_spec_tester(
                 w_cap=w_cap,
             )
             record.update(noise)
-
+        print(record['gn_slope'])
         hist.append(record)
 
         # keep best posterior
@@ -264,7 +264,7 @@ def duo_spec_tester(
 
 
 # ──────────────────────────────────────────── 3. demo ──
-def main():
+def main_bethe():
     # Example: Amazon metadata graph (Hamming distance version)
     G = nx.read_gml("amazon_metadata_test/amazon_hamming_bookDVD.gml")
     H_obs = coords_str2arr(G)
@@ -313,6 +313,53 @@ def main():
     slope, *_ = linregress(range(len(mse)), mse)
     print("slope =", slope)
 
+def main_motif():
+    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
+    H_obs = coords_str2arr(G)
+
+    result = duo_spec_tester(
+        H_obs,
+        # ❶ core model size
+        K           = 2,
+        num_balls   = 32,
+        config      = ("motif"),
+
+        # ❷ give the loop plenty of runway
+        max_em_iters = 150,      # hard cap
+        warmup_rounds= 6,        # first 6 iters: no weight changes
+        anneal_steps = 18,       # then λ ramps up over 18 more iters
+
+        # ❸ make each weight tweak gentler
+        shrink_comm = 0.45,      # ↓ from 1.00
+        shrink_geo  = 0.40,
+        boost_comm  = 0.25,      # ↓ from 0.60
+        boost_geo   = 0.20,
+
+        # ❹ touch fewer edges per round
+        comm_cut        = 0.96,  # only top 4 % p_same shrink
+        geo_cut         = 0.96,
+        boost_cut_comm  = 0.995, # boost only the most confident 0.5 %
+        boost_cut_geo   = 0.995,
+
+        # ❺ noise-meter: stricter plateau test
+        noise_sample = 30_000,   # smoother GN-MSE curve
+        noise_window = 8,        # need 8 flat points
+        noise_tol    = 2e-5,     # “flat” means Δ<2 × 10⁻⁵
+
+        # ❻ stop only when *really* done
+        tol        = 5e-6,       # objective tolerance
+        patience   = 20,         # (if you re-enable patience later)
+
+        random_state = 42,
+    )
+
+    # print noise trajectory
+    for row in result["history"]:
+        print(row["it"], row["gn_mse"], row["gn_dev"], row["gn_slope"])
+
+    mse = np.array([h["gn_mse"] for h in result["history"]])
+    slope, *_ = linregress(range(len(mse)), mse)
+    print("slope =", slope)  
 
 if __name__ == "__main__":
-    main()
+    main_motif()

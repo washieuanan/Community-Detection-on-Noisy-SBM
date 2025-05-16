@@ -32,7 +32,7 @@ from deprecated.observations.standard_observe import PairSamplingObservation, ge
 from algorithms.bp.vectorized_bp import belief_propagation, beta_param
 from sklearn.neighbors import KernelDensity
 
-from algorithms.spectral_ops.attention import byoe_embedding, multihead_spectral_embedding, motif_spectral_embedding_vec
+from algorithms.spectral_ops.attention import byoe_embedding, motif_spectral_embedding
 # censoring schemes
 # ---------------------------------------------------------------------
 # 1)  Erdős–Rényi edge–mask  (keep each edge independently with ρ)
@@ -1335,8 +1335,7 @@ def get_callable(calls: Union[Tuple, str]):
         'hybrid_bethe_dirichlet': hybrid_bethe_dirichlet, 
         'ppr_proj': ppr_proj, 
         'byoe_embedding': byoe_embedding,
-        'multihead': multihead_spectral_embedding, 
-        'motif': motif_spectral_embedding_vec, 
+        'motif': motif_spectral_embedding, 
         "dwpe":              dwpe,
         "geo_bethe_hessian": geo_bethe_hessian,
     }
@@ -1419,6 +1418,7 @@ def duo_spec(
     tol=1e-4,
     patience=7,
     random_state=0,
+    spec_params: dict = {},
 ):
     """Pure-spectral EM with both up- and down-weighting of edges."""
     rng = np.random.default_rng(random_state)
@@ -1437,13 +1437,21 @@ def duo_spec(
         d = step - warmup_rounds
         if d <= 0:  return 0.0
         return base if d >= anneal_steps else base * d / anneal_steps
-
+    # def _lam(step, base, warmup_rounds=0, anneal_steps=50):
+    #     if step < warmup_rounds:           # ❶ pure warm-up
+    #         return 0.0
+    #     d = step - warmup_rounds
+    #     if d < anneal_steps:               # ❷ linear ramp
+    #         return base * d / anneal_steps
+    #     # ❸ harmonic decay after plateau
+    #     t = d - anneal_steps
+    #     return base / (1 + t)
     # -----------------------------------------------------------------------
     for em in range(1, max_em_iters + 1):
         print(f"[EM] iter {em} / {max_em_iters}")
         # ---------------- community embedding -----------------------------
         Q_comm, hard_comm, *_ = config[0](
-            subG, q=K, random_state=random_state
+            subG, q=K, random_state=random_state, **spec_params
         )
         p_same = _edge_same_prob(Q_comm, iu_glob, iv_glob)
         mask_comm_shrink = p_same > np.percentile(p_same, comm_cut * 100)
@@ -1451,7 +1459,7 @@ def duo_spec(
 
         # ---------------- geometry embedding ------------------------------
         Q_geo, hard_geo, *_ = config[1](
-            subG, q=num_balls, random_state=random_state
+            subG, q=num_balls, random_state=random_state, **spec_params
         )
         same_ball = hard_geo[iu_glob] == hard_geo[iv_glob]
         conf_g = 0.5 * (Q_geo[iu_glob, hard_geo[iu_glob]] +
@@ -1678,7 +1686,7 @@ if __name__ == "__main__":
     a = 30
     b = 5
     n = 1000
-    K = 3
+    K = 4
     r_in = np.sqrt(a * np.log(n) / n)
     r_out = np.sqrt(b * np.log(n) / n)
     print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
@@ -1693,7 +1701,7 @@ if __name__ == "__main__":
     )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
 
-    subG = geometric_censor(G_true, r=0.5, seed=42)
+    # subG = geometric_censor(G_true, r=0.5, seed=42)
     
     res = duo_spec(
         G_true,

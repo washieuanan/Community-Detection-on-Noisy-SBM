@@ -279,6 +279,8 @@ def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000
     -------
     stats : dict   – identical keys to your original function
     """
+    
+    print("PREDS", preds)
    
     k = int(max(preds.max(), true.max()) + 1)
     C = confusion_matrix(true, preds, labels=np.arange(k))  
