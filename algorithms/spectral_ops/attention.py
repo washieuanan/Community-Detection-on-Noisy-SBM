@@ -206,10 +206,10 @@ def motif_spectral_embedding(
     *,
     beta         : float = 0.3,
     clip_max     : float = 1e2,
-    dim          : int   = 64,
-    walk_len     : int   = 40,
-    num_walks    : int   = 10,
-    window       : int   = 5,
+    dim          : int   = 128,
+    walk_len     : int   = 60,
+    num_walks    : int   = 20,
+    window       : int   = 10,
     random_state : int   = 42,
 ) -> tuple[np.ndarray,np.ndarray,dict,dict]:
     """
