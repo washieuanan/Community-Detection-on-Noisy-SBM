@@ -657,10 +657,13 @@ def duo_spec(
     tol=1e-4,
     patience=7,
     random_state=0,
+    base_seed=None,
     spec_params: dict = {},
 ):
     """Pure-spectral EM with both up- and down-weighting of edges."""
     rng = np.random.default_rng(random_state)
+    if base_seed is not None:
+        rng_base = np.random.RandomState(base_seed)
     subG = deepcopy(H_obs)
     for _, _, d in subG.edges(data=True):
         d.setdefault("weight", 1.0)
@@ -688,6 +691,8 @@ def duo_spec(
     # -----------------------------------------------------------------------
     for em in range(1, max_em_iters + 1):
         print(f"[EM] iter {em} / {max_em_iters}")
+        if base_seed is not None:
+            random_state = rng_base.randint(0, 2**32 - 1)
         # ---------------- community embedding -----------------------------
         Q_comm, hard_comm, *_ = config[0](
             subG, q=K, random_state=random_state, **spec_params
