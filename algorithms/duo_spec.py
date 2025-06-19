@@ -730,9 +730,7 @@ def duo_spec(
 
         # ---------------- objective & bookkeeping -------------------------
         obj = float(np.max(Q_comm, axis=1).sum())
-        hist.append(dict(it=em, obj=obj, edges=subG.number_of_edges(),
-                         shrink_comm=drop_c, shrink_geo=drop_g,
-                         boost_comm=boost_c,  boost_geo=boost_g))
+        hist.append(dict(it=em, obj=obj, edges=subG.number_of_edges()))
 
         if obj > best["obj"]:
             best.update(obj=obj, beliefs=Q_comm, balls=hard_geo,
