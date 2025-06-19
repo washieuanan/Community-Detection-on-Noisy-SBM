@@ -253,8 +253,13 @@ def fast_weighted(
     neigh_idx  = []
     neigh_prob = []
     for u in nodes:
+        neighbors = list(G.neighbors(u))
+        if not neighbors:
+            neigh_idx.append(np.array([], dtype=np.int32))
+            neigh_prob.append(np.array([], dtype=np.float64))
+            continue
         nbrs, wts = zip(*[(node2i[v], float(G[u][v].get(weight_key, 1.0)))
-                          for v in G.neighbors(u)])
+                          for v in neighbors])
         wts = np.asarray(wts, dtype=np.float64)
         tot = wts.sum()
         if tot == 0.0:
