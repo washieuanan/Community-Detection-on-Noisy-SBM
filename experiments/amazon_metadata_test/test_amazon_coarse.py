@@ -38,8 +38,8 @@ def coords_str2arr(G: nx.Graph, dim = 16):
 
 if __name__ == "__main__":
 
-    # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml") # 40k+ nodes
-    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
+    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml") # 40k+ nodes
+    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
     G = coords_str2arr(G)
 
 

@@ -25,7 +25,7 @@ def _conf_from_center(X, mu):
     Q    /= Q.sum(axis=1, keepdims=True)
     return Q
 
-pmi_svd_embeddings = grab_pmi_func(fast=False, weighted=True)  # ADJUST SETTINGS HERE
+pmi_svd_embeddings = grab_pmi_func(fast=True, weighted=True)  # ADJUST SETTINGS HERE
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3.  Attention Laplacian  H = D^{-1/2}  softmax(Z Zᵀ/√d | edges)  D^{-1/2}
