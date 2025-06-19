@@ -1,5 +1,4 @@
 from algorithms.bp.old.vectorized_geometric_bp import (
-    belief_propagation,
     detection_stats,
     get_true_communities,
 )
@@ -7,18 +6,13 @@ from algorithms.bp.old.vectorized_geometric_bp import (
 import numpy as np
 import networkx as nx
 
-from algorithms.bp.old.duo_bp import (
-    duo_bp,
-    create_dist_observed_subgraph,
-)
 
 from algorithms.duo_spec import duo_spec
 import os
 import json
 import logging
 import random
-from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
-from algorithms.spectral_ops.attention import motif_spectral_embedding
+from algorithms.bp.vectorized_bp import belief_propagation_weighted
 
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
@@ -44,7 +38,8 @@ def coords_str2arr(G: nx.Graph, dim = 16):
 
 if __name__ == "__main__":
 
-    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml") # 40k+ nodes
+    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
     G = coords_str2arr(G)
 
 
@@ -60,13 +55,27 @@ if __name__ == "__main__":
 
         # — EM schedule
         max_em_iters    = 100,                  # allow more EM steps
-        warmup_rounds   = 2,                   # hold off on any re-weighting
-        anneal_steps    = 10,                   # then ramp λ from 0→full over 30 iter
-
+        warmup_rounds   = 0,                   # hold off on any re-weighting
+        anneal_steps    = 2,  #20                 # then ramp λ from 0→full over 30 iter
+        comm_cut        = 0.87, #0.90
+        geo_cut         = 0.87, #0.90
+        shrink_comm     = 0.65, #1.00
+        shrink_geo      = 0.35,
+        boost_comm      = 0.40,
+        boost_geo       = 0.35,
+        boost_cut_comm  = 0.97, #0.97
+        boost_cut_geo   = 0.97,
         # — convergence
         tol             = 1e-5,
-        patience        = 5,
+        patience        = 10,
         random_state    = 42,
+        base_seed       = 0,
+        spec_params     = dict(
+            dim       = 64,
+            walk_len  = 40,
+            num_walks = 10,
+            window    = 5,
+        )
     )
     
     res = duo_spec(G, **duo_params)
