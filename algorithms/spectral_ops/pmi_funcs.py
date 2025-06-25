@@ -17,6 +17,7 @@ def slow_unweighted(
     num_walks      : int   = 15,
     window         : int   = 10,
     seed           : int   = 42,
+    weight_pow     : float = 1.0,
 ) -> dict[str, np.ndarray]:
     """
     Return dict {node-id (str) -> ℝ^dim embedding} using
@@ -315,9 +316,70 @@ def fast_weighted(
     )
     return {str(idx2node[i]): U[i] for i in range(n)}
 
+
+def fast_weighted_hybrid(
+    G              : nx.Graph,
+    dim            : int   = 64,
+    *,
+    walk_len       : int   = 60,
+    num_walks      : int   = 15,
+    window         : int   = 10,
+    seed           : int   = 42,
+    weight_key     : str   = "weight",
+) -> Dict[str, np.ndarray]:
+    """
+    Fast vectorized PPMI-SVD that mimics DeepWalk's raw count + window behavior:
+      1) Build unnormalized weighted adjacency A.
+      2) Accumulate length-ℓ walks: C += decay(ℓ) * A^ℓ
+         where decay(ℓ) = max(0, (window + 1 - ℓ)/window).
+      3) Convert C to PPMI.
+      4) Truncated SVD on PPMI → embeddings.
+    """
+    # 1) build adjacency A
+    nodes = list(G.nodes())
+    n = len(nodes)
+    node2i = {u: i for i, u in enumerate(nodes)}
+
+    rows, cols, data = [], [], []
+    for u, v, d in G.edges(data=True):
+        i, j = node2i[u], node2i[v]
+        w = float(d.get(weight_key, 1.0))
+        rows.extend([i, j])
+        cols.extend([j, i])
+        data.extend([w, w])
+    A = coo_matrix((data, (rows, cols)), shape=(n, n)).tocsr()
+
+    # 2) precompute decay for each hop
+    decay = np.zeros(walk_len + 1, dtype=float)
+    for ℓ in range(1, walk_len + 1):
+        decay[ℓ] = max(0.0, (window + 1 - ℓ) / window)
+
+    # 3) accumulate raw count-like co-occurrences
+    C = csr_matrix((n, n), dtype=float)
+    M = A.copy()
+    for ℓ in range(1, walk_len + 1):
+        M = M @ A
+        if decay[ℓ] > 0:
+            C += decay[ℓ] * M
+
+    # 4) PPMI transform
+    C = C.tocoo()
+    row_sum = np.array(C.sum(axis=1)).ravel()
+    col_sum = np.array(C.sum(axis=0)).ravel()
+    total = row_sum.sum() + 1e-9
+    pmi_vals = np.log((C.data * total) /
+                      (row_sum[C.row] * col_sum[C.col] + 1e-9) + 1e-9)
+    pmi_vals[pmi_vals < 0] = 0.0
+    X = csr_matrix((pmi_vals, (C.row, C.col)), shape=C.shape)
+
+    # 5) truncated SVD
+    U, S, _ = svds(X, k=dim, return_singular_vectors="u")
+    embeddings = {str(nodes[i]): U[i] * np.sqrt(S) for i in range(n)}
+    return embeddings
+    
 def grab_pmi_func(fast: bool = False, weighted: bool = True):
     if fast and weighted:
-        return fast_weighted
+        return fast_weighted_hybrid
     if fast and not weighted:
         return fast_unweighted
     if not fast and weighted:
