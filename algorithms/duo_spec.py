@@ -618,7 +618,8 @@ def _scale_edges(G, mask, conf, lam, w_min, w_cap, mode="shrink"):
             continue
         w = G[u][v]["weight"]
         if mode == "shrink":
-            new_w = max(w_min, w * (1.0 - lam))
+            lam_i = lam * (1 - c)             # if c≈1 (very confident), lam_i≈0 
+            new_w = max(w_min, w * (1 - lam_i))
         else:                                   # boost
             fac   = 1.0 + lam * c              # confidence-adaptive
             new_w = min(w_cap, w * fac)
@@ -630,6 +631,49 @@ def _scale_edges(G, mask, conf, lam, w_min, w_cap, mode="shrink"):
 
 # ---------------------------------------------------------------------------
 # main -----------------------------------------------------------------------
+
+def threshold(G: nx.Graph, theta: float) -> nx.Graph:
+    """
+    Remove edges with weight below theta while preserving connectivity.
+    
+    Parameters
+    ----------
+    G : nx.Graph
+        Input weighted graph
+    theta : float 
+        Weight threshold below which edges are candidates for removal
+        
+    Returns
+    -------
+    nx.Graph
+        Graph with low-weight edges removed while staying connected
+    """
+    # Make a copy to avoid modifying input
+    H = G.copy()
+    removed = 0
+    # Get edges below threshold
+    low_weight_edges = [(u,v) for (u,v,w) in H.edges(data='weight') 
+                       if w < theta]
+    # Sort edges by weight from lowest to highest
+    low_weight_edges.sort(key=lambda e: H[e[0]][e[1]]['weight'])
+    
+    # Try removing each low weight edge
+    for u,v in low_weight_edges:
+        # Temporarily remove edge
+        H.remove_edge(u,v)
+        
+        # Check if graph is still connected
+        if not nx.is_connected(H):
+            # If not, add edge back
+            H.add_edge(u,v, weight=G[u][v]['weight'])
+        else:
+            removed += 1
+    print(f"Removed {removed} edges")
+    # Set all edge weights to 1
+    for u, v in H.edges():
+        H[u][v]['weight'] = 1.0
+    return H
+
 def duo_spec(
     H_obs: nx.Graph,
     K: int,
@@ -638,7 +682,7 @@ def duo_spec(
     *,
     # EM
     max_em_iters=50,
-    anneal_steps=6,
+    anneal_steps=0,
     warmup_rounds=2,
     # percentile cuts
     comm_cut=0.90,
@@ -675,19 +719,19 @@ def duo_spec(
     best, hist, no_imp = {"obj": -np.inf}, [], 0
     config = get_callable(config)
 
-    def _lam(step, base):            # linear ramp-up after warm-up
-        d = step - warmup_rounds
-        if d <= 0:  return 0.0
-        return base if d >= anneal_steps else base * d / anneal_steps
-    # def _lam(step, base, warmup_rounds=0, anneal_steps=50):
-    #     if step < warmup_rounds:           # ❶ pure warm-up
-    #         return 0.0
+    # def _lam(step, base):            # linear ramp-up after warm-up
     #     d = step - warmup_rounds
-    #     if d < anneal_steps:               # ❷ linear ramp
-    #         return base * d / anneal_steps
-    #     # ❸ harmonic decay after plateau
-    #     t = d - anneal_steps
-    #     return base / (1 + t)
+    #     if d <= 0:  return 0.0
+    #     return base if d >= anneal_steps else base * d / anneal_steps
+    def _lam(step, base, warmup_rounds=0, anneal_steps=anneal_steps):
+        if step < warmup_rounds:           # ❶ pure warm-up
+            return 0.0
+        d = step - warmup_rounds
+        if d < anneal_steps:               # ❷ linear ramp
+            return base * d / anneal_steps
+        # ❸ harmonic decay after plateau
+        t = d - anneal_steps
+        return base / (1 + t)
     # -----------------------------------------------------------------------
     for em in range(1, max_em_iters + 1):
         print(f"[EM] iter {em} / {max_em_iters}")
@@ -751,15 +795,39 @@ def duo_spec(
             break
 
     hard_final = best["beliefs"].argmax(1)
+    # Get the 25th percentile of edge weights
+    
+    edge_weights = np.array([d['weight'] for _, _, d in subG.edges(data=True)])
+    theta = np.percentile(edge_weights, 30)
+    theta = min(1.0, theta)
+    end_G = threshold(subG, theta)
+    # Run final spectral clustering on end_G
+    Q, hard, _, _ = config[0](
+        end_G,
+        q=K,
+        random_state=random_state,
+        **spec_params
+    )
     return dict(
-        beliefs=best["beliefs"],
-        communities=hard_final,
+        beliefs=Q,
+        communities=Q.argmax(1),
         balls=best["balls"],
-        node2idx=best["node2idx"],
-        idx2node={i: u for u, i in best["node2idx"].items()},
+        node2idx=node2idx,
+        idx2node={i: u for u, i in node2idx.items()},
         history=hist,
         G_final=subG,
     )
+    
+    # return dict(
+    #     beliefs=best["beliefs"],
+    #     communities=hard_final,
+    #     balls=best["balls"],
+    #     node2idx=best["node2idx"],
+    #     idx2node={i: u for u, i in best["node2idx"].items()},
+    #     history=hist,
+    #     G_final=subG,
+    # )
+
 
 
 def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000):
@@ -802,36 +870,79 @@ if __name__ == "__main__":
     from block_models.sbm.sbm import generate_noisy_sbm
     from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from algorithms.bp.vectorized_bp import belief_propagation, beta_param
-    a = 30
-    b = 5
-    n = 1000
-    K = 4
-    r_in = np.sqrt(a * np.log(n) / n)
-    r_out = np.sqrt(b * np.log(n) / n)
-    print(f"r_in = {r_in:.4f}, r_out = {r_out:.4f}")
     # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
+# {"parameters": {"n": 650, "K": 2, "a": 40, "b": 6, "p_in": 0.39858291463936507, "p_out": 0.05978743719590476, "sigma": 0.75},
+    # G_true = generate_noisy_sbm(
+    #     n=650,
+    #     K=2,
+    #     p_in=0.39858291463936507,
+    #     p_out=0.05978743719590476,
+    #     sigma=0.90,
+    #     seed=42
+    # )
+    # G_true = generate_noisy_sbm(
+    #     n=400,
+    #     K=2,
+    #     p_in=1,
+    #     p_out=0.1,
+    #     sigma=0.75,
+    #     seed=42
+    # )
+# {"parameters": {"n": 300, "K": 2, "a": 55, "b": 6, "p_in": 1.0456934536869702, "p_out": 0.11407564949312402, "sigma": 0.5}    
     G_true = generate_noisy_sbm(
-        n=900,
+        n=300,
         K=2,
-        p_in=0.7,
-        p_out=0.196,
-        sigma=0.5,
+        p_in=1.0456934536869702,
+        p_out=0.11407564949312402,
+        sigma=0.75,
         seed=42
     )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
 
     # subG = geometric_censor(G_true, r=0.5, seed=42)
-    
-    res = duo_spec(
-        subG,
-        K=2,
-        config='bethe_hessian',
+    duo_params = dict(
+    K               = 2,
+    num_balls       = 8,    
+    config          = 'motif',
+
+    max_em_iters    = 60,
+    warmup_rounds   = 0,
+    anneal_steps    = 8,
+
+    # community masks & strengths
+    comm_cut        = 0.80,
+    shrink_comm     = 0.05,
+    boost_cut_comm  = 0.90,
+    boost_comm      = 0.80,
+
+    # geometry disabled
+    geo_cut         = 0.80,
+    shrink_geo      = 0.40,
+    boost_cut_geo   = 0.97,
+    boost_geo       = 0.10,
+
+    # weight bounds
+    w_min           = 0.01,
+    w_cap           = 2.00,
+
+    tol             = 1e-5,
+    patience        = 5,
+    random_state    = 42,
+    base_seed       = 0,
+
+    spec_params     = dict(
+        dim       = 64,
+        walk_len  = 40,
+        num_walks = 2,
+        window    = 5,
+        weight_pow=1.0,
     )
-    # Q, preds, node2idx, idx2node = dwpe(
-    #     subG,
-    #     q=2,
-    #     random_state=42,
-    # )
+    )
+   
+    res = duo_spec(
+        G_true, **duo_params
+    )
+
     preds = res["communities"]
 
 
@@ -839,5 +950,17 @@ if __name__ == "__main__":
     stats = detection_stats(preds, true_labels)
 
     print("\n=== Community‑detection accuracy ===")
+    for k, v in stats.items():
+        print(f"{k:>25s} : {v}")
+        
+    _, preds, _, _ = motif_spectral_embedding(
+        G_true,
+        q=2,
+        random_state=42,
+        **duo_params["spec_params"]
+    )
+    stats = detection_stats(preds, true_labels)
+
+    print("\n=== Community‑detection accuracy Motif===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")

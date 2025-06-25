@@ -5,7 +5,7 @@ from typing import Dict
 import numpy  as np
 import networkx as nx
 import scipy.sparse as sp
-from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import eigsh, lobpcg
 from sklearn.cluster import KMeans
 from sklearn.cluster import KMeans
 
@@ -25,7 +25,7 @@ def _conf_from_center(X, mu):
     Q    /= Q.sum(axis=1, keepdims=True)
     return Q
 
-pmi_svd_embeddings = grab_pmi_func(fast=True, weighted=True)  # ADJUST SETTINGS HERE
+pmi_svd_embeddings = grab_pmi_func(fast=False, weighted=False)  # ADJUST SETTINGS HERE
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3.  Attention Laplacian  H = D^{-1/2}  softmax(Z Zᵀ/√d | edges)  D^{-1/2}
@@ -70,6 +70,7 @@ def motif_attention_laplacian(
     weight_pow   : float  = 1.0,  # NEW: exponent applied to edge weights
     weight_eps   : float  = 1e-12,# NEW: avoids zeroing very small weights
     random_state : int    = 42,
+    gamma        : float  = 0.5, 
 ) -> sp.csr_matrix:
     """
     motif attention laplacian with weights -- should still work without weights but haven't tested
@@ -87,16 +88,23 @@ def motif_attention_laplacian(
     for u, v, d in H_obs.edges(data=True):
         i, j = node2i[u], node2i[v]
         zu, zv = Z[str(u)], Z[str(v)]
-        score  = np.dot(zu, zv) * scale
-        att    = np.exp(np.clip(score, a_min=None,
-                                a_max=np.log(clip_max)))
+        # score  = np.dot(zu, zv) * scale
+        # att    = np.exp(np.clip(score, a_min=None,
+        #                         a_max=np.log(clip_max)))
 
-        # ----------  ★ incorporate the stored edge weight  ---------------
-        w_edge = float(d.get("weight", 1.0))
-        w_edge = max(w_edge, weight_eps)          # avoid exact 0
-        att   *= w_edge ** weight_pow
-        # -----------------------------------------------------------------
-
+        # # ----------  ★ incorporate the stored edge weight  ---------------
+        # w_edge = float(d.get("weight", 1.0))
+        # w_edge = max(w_edge, weight_eps)          # avoid exact 0
+        # att   *= w_edge ** weight_pow
+        # # -----------------------------------------------------------------
+        score    = np.dot(zu, zv) * scale
+        w_edge   = float(d.get("weight", 1.0))
+        w_edge   = max(w_edge, weight_eps)
+        log_w    = np.log(w_edge)
+        gated    = score + gamma * log_w
+        att      = np.exp(np.clip(gated,
+                                   a_min=None,
+                                   a_max=np.log(clip_max)))
         iu.append(i); iv.append(j); data.append(att)
 
     W = sp.coo_matrix((data, (iu, iv)), shape=(n, n)).tocsr()
@@ -115,8 +123,8 @@ def motif_attention_laplacian(
     deg = np.array(W_mix.sum(axis=1)).ravel() + 1e-9
     D_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
     H = D_inv_sqrt @ W_mix @ D_inv_sqrt
-
     return H.tocsr()
+
 
 def motif_spectral_embedding(
     H_obs        : nx.Graph,
@@ -129,6 +137,7 @@ def motif_spectral_embedding(
     num_walks    : int   = 20,
     window       : int   = 10,
     random_state : int   = 42,
+    weight_pow   : float = 1.0,
 ) -> tuple[np.ndarray,np.ndarray,dict,dict]:
     """
     1) Build node embeddings Z via PPMI+SVD (pure NumPy).
@@ -140,7 +149,10 @@ def motif_spectral_embedding(
     nodes     = list(H_obs.nodes())
     node2idx  = {u:i for i,u in enumerate(nodes)}
     idx2node  = {i:u for u,i in node2idx.items()}
-
+    # compute average edge weight in H_obs
+    weights = [d.get('weight', 1.0) for _, _, d in H_obs.edges(data=True)]
+    avg_weight = sum(weights) / len(weights) if weights else 0
+    print(f"Average edge weight in H_obs: {avg_weight:.4f}")
     # --- 1) get Z embeddings -----------------------------------------------
     Z = pmi_svd_embeddings(
         H_obs,
@@ -148,8 +160,13 @@ def motif_spectral_embedding(
         walk_len=walk_len,
         num_walks=num_walks,
         window=window,
-        seed=random_state
+        seed=random_state,
+        weight_pow=weight_pow
     )
+    # Calculate and print average element in Z embeddings
+    Z_values = np.array(list(Z.values()))
+    avg_Z = np.mean(Z_values)
+    print(f"Average element in Z embeddings: {avg_Z:.4f}")
 
     print("Finished PPMI-SVD embeddings")
     # --- 2) build motif‐attention Laplacian -------------------------------
@@ -158,12 +175,14 @@ def motif_spectral_embedding(
         Z,
         beta=beta,
         clip_max=clip_max,
-        random_state=random_state
+        random_state=random_state,
+        weight_pow=weight_pow
     )
     print("Finished motif-attention Laplacian")
     # --- 3) spectral clustering -------------------------------------------
     ncv = 2 * min(H.shape[0]-1, max(2*q+1, q+20))
     vals, vecs = eigsh(H, k=q, which="LA", ncv=ncv, tol=1e-4)
+
 
     km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
     hard = km.labels_
