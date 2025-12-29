@@ -702,6 +702,7 @@ def duo_spec(
     patience=7,
     random_state=0,
     base_seed=None,
+    theta=30,
     spec_params: dict = {},
 ):
     """Pure-spectral EM with both up- and down-weighting of edges."""
@@ -798,9 +799,9 @@ def duo_spec(
     # Get the 25th percentile of edge weights
     
     edge_weights = np.array([d['weight'] for _, _, d in subG.edges(data=True)])
-    theta = np.percentile(edge_weights, 30)
-    theta = min(1.0, theta)
-    end_G = threshold(subG, theta)
+    theta_p = np.percentile(edge_weights, theta)
+    theta_p = min(1.0, theta_p)
+    end_G = threshold(subG, theta_p)
     # Run final spectral clustering on end_G
     Q, hard, _, _ = config[0](
         end_G,

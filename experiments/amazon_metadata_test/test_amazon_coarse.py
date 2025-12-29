@@ -63,24 +63,24 @@ def connect_components(G: nx.Graph, weight: float = 1e-3) -> None:
 if __name__ == "__main__":
 
     # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml") # 40k+ nodes
-    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
+    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
+    G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
     G = coords_str2arr(G)
     print(nx.is_connected(G))
     print(nx.number_connected_components(G))
-    connect_components(G, weight=1e-3)
+    connect_components(G, weight=1)
 
 
-    print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
     
     duo_params = dict(
     K               = 2,
-    num_balls       = 8,    
+    num_balls       = 16,    
     config          = 'motif',
 
     max_em_iters    = 60,
     warmup_rounds   = 0,
-    anneal_steps    = 8,
+    anneal_steps    = 20,
 
     # community masks & strengths
     comm_cut        = 0.80,
@@ -105,8 +105,8 @@ if __name__ == "__main__":
 
     spec_params     = dict(
         dim       = 64,
-        walk_len  = 40,
-        num_walks = 5,
+        walk_len  = 64,
+        num_walks = 20,
         window    = 5,
         weight_pow=1.0,
     )
