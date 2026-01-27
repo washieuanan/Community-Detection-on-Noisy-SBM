@@ -10,7 +10,6 @@ import numpy as np
 from block_models.cbsm.sbm import generate_noisy_sbm
 
 from algorithms.duo_spec import (
-    duo_bprop, 
     duo_spec, 
     create_dist_observed_subgraph, 
     erdos_renyi_mask, 
@@ -150,19 +149,6 @@ def run_experiments():
             except Exception as e:
                 results['duo_spec'] = {'error': str(e)}
             
-            # Duo bprop
-            try:
-                res = duo_bprop(G_true, K=K)
-                preds = res['communities']
-                true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
-                stats = detection_stats(preds, true_labels)
-                results['duo_bprop'] = {
-                    'stats': stats,
-                    'preds': preds
-                }
-            except Exception as e:
-                results['duo_bprop'] = {'error': str(e)}
-            
             # Save results
             output = {
                 'parameters': {
@@ -239,19 +225,6 @@ def run_experiments():
                 }
             except Exception as e:
                 results['duo_spec'] = {'error': str(e)}
-            
-            # Duo bprop
-            try:
-                res = duo_bprop(G_masked, K=K)
-                preds = res['communities']
-                true_labels = get_true_communities(G_true, node2idx=None, attr="comm")
-                stats = detection_stats(preds, true_labels)
-                results['duo_bprop'] = {
-                    'stats': stats,
-                    'preds': preds.tolist()
-                }
-            except Exception as e:
-                results['duo_bprop'] = {'error': str(e)}
             
             # Save results
             output = {

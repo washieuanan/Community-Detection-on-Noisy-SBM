@@ -202,7 +202,11 @@ _duo_mod.motif_spectral_embedding = motif_spectral_embedding_nystrom
 
 
 if __name__ == "__main__":
-    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    G = nx.read_gml(os.path.join(data_dir, "amz_allviddvd.gml"))
     print(G.number_of_nodes())
     G = coords_str2arr(G)
 

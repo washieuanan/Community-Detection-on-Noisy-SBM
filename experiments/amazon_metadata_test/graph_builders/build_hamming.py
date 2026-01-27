@@ -171,8 +171,13 @@ if __name__ == "__main__":
     from collections import Counter
     import networkx as nx
     from collections import defaultdict
+    
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
     # Example usage
-    products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
+    products = json.load(open(os.path.join(data_dir, "parsed_amazon_meta.json")))
     G = build_category_graph(products, subsampled_classes=['Video', 'DVD'])
     def subsample_equal_connected(G, desired_n=1000, class_attr='comm', seed=None):
         rng = random.Random(seed)
@@ -269,8 +274,8 @@ if __name__ == "__main__":
             coords = G.nodes[node]['coords']
             G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-    nx.write_gml(G, 'amazon_metadata_test/amz_allviddvd.gml')
-    # G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
+    nx.write_gml(G, os.path.join(data_dir, 'amz_allviddvd.gml'))
+    # G = nx.read_gml(os.path.join(data_dir, "amazon_hamming_videoDVD.gml"))
     
     # node_info = G.nodes['0']['coords']
     # node_info = np.fromstring(node_info[1:-1], sep=",")

@@ -173,7 +173,13 @@ def embed_products(products,
 
 
 if __name__ == '__main__':
-    products = json.load(open('amazon_metadata_test/parsed_amazon_meta.json'))
+    import os
+    
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    products = json.load(open(os.path.join(data_dir, 'parsed_amazon_meta.json')))
     G = embed_products(
         products,
         method='categories',
@@ -188,5 +194,5 @@ if __name__ == '__main__':
                 G.nodes[node]['coords'] = str(coords.tolist())
     print("Number of nodes:", G.number_of_nodes())
     print("Sample node coords:", G.nodes[0]['coords'])
-    print("Sample edge dist:", next(iter(G.edges(data=True))) )
-    nx.write_gml(G, 'amazon_metadata_test/amazon_categories_cosine.gml')
+    print("Sample edge dist:", next(iter(G.edges(data=True))))
+    nx.write_gml(G, os.path.join(data_dir, 'amazon_categories_cosine.gml'))

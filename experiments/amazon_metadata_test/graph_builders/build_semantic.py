@@ -114,31 +114,37 @@ def build_category_graph_semantic(
 
 if __name__ == "__main__":
     import json
-    products = json.load(open("amazon_metadata_test/parsed_amazon_meta.json"))
+    import os
+    
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    products = json.load(open(os.path.join(data_dir, "parsed_amazon_meta.json")))
     G = build_category_graph_semantic(
         products,
         subsampled_classes=['DVD','Video'],
         embed_model_name='all-MiniLM-L6-v2'
     )
-print("Nodes:", G.number_of_nodes(), "Edges:", G.number_of_edges())
-# Example inspect
-print("Sample node coords shape:", G.nodes[0]['coords'].shape)
-print("Sample edge dist:", next(iter(G.edges(data=True))))
+    print("Nodes:", G.number_of_nodes(), "Edges:", G.number_of_edges())
+    # Example inspect
+    print("Sample node coords shape:", G.nodes[0]['coords'].shape)
+    print("Sample edge dist:", next(iter(G.edges(data=True))))
 
-# Convert all numeric values to strings before writing to GML
-# Convert node coordinates
-for node in G.nodes():
-    if 'coords' in G.nodes[node]:
-        coords = G.nodes[node]['coords']
-        # Convert numpy array to comma-separated string
-        G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+    # Convert all numeric values to strings before writing to GML
+    # Convert node coordinates
+    for node in G.nodes():
+        if 'coords' in G.nodes[node]:
+            coords = G.nodes[node]['coords']
+            # Convert numpy array to comma-separated string
+            G.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
 
-# Convert edge attributes
-for u, v, data in G.edges(data=True):
-    if 'cosine_dist' in data:
-        data['cosine_dist'] = str(data['cosine_dist'])
-    if 'dist' in data:
-        data['dist'] = str(data['dist'])
+    # Convert edge attributes
+    for u, v, data in G.edges(data=True):
+        if 'cosine_dist' in data:
+            data['cosine_dist'] = str(data['cosine_dist'])
+        if 'dist' in data:
+            data['dist'] = str(data['dist'])
 
-# Now write to GML
-nx.write_gml(G, 'amazon_metadata_test/amazon_semantic_videoDVD.gml')
+    # Now write to GML
+    nx.write_gml(G, os.path.join(data_dir, 'amazon_semantic_videoDVD.gml'))

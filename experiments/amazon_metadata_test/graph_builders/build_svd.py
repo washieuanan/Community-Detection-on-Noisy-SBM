@@ -178,28 +178,34 @@ def embed_products(products,
         G.nodes[idx]['coords'] = coord
     return G
 
-import json
-import networkx as nx
-products = json.load(open('amazon_metadata_test/parsed_amazon_meta.json'))
-# products: your dict of ASIN → {'group':…, 'similar':[…], 'categories':[…]}
-G_embedded = embed_products(
-    products,
-    method='svd',              # or 'umap', 'landmark_mds', 'node2vec', 'minhash_lsh'
-    subsampled_classes=['DVD', 'Video'],
-    embedding_dim=16,
-    random_state=42,
-    use_dask=True,             # only if Dask-ML is installed and you want parallel SVD
-    n_landmarks=2000,          # for landmark_mds
-    walklen=20, epochs=2,      # for node2vec
-    num_perm=256, threshold=0.6  # for minhash_lsh
-)
-print("Number of nodes:", G_embedded.number_of_nodes())
-print("Node names:", list(G_embedded.nodes())[:5])
-# Convert numpy array coordinates to strings
-for node in G_embedded.nodes():
-    if 'coords' in G_embedded.nodes[node]:
-        coords = G_embedded.nodes[node]['coords']
-        G_embedded.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
-
-nx.write_gml(G_embedded, 'amazon_metadata_test/amazon_cosine_videoDVD.gml')
-# Now each node G_embedded.nodes[asin]['coords'] is a length-16 unit vector.
+if __name__ == '__main__':
+    import json
+    import os
+    
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    products = json.load(open(os.path.join(data_dir, 'parsed_amazon_meta.json')))
+    # products: your dict of ASIN → {'group':…, 'similar':[…], 'categories':[…]}
+    G_embedded = embed_products(
+        products,
+        method='svd',              # or 'umap', 'landmark_mds', 'node2vec', 'minhash_lsh'
+        subsampled_classes=['DVD', 'Video'],
+        embedding_dim=16,
+        random_state=42,
+        use_dask=True,             # only if Dask-ML is installed and you want parallel SVD
+        n_landmarks=2000,          # for landmark_mds
+        walklen=20, epochs=2,      # for node2vec
+        num_perm=256, threshold=0.6  # for minhash_lsh
+    )
+    print("Number of nodes:", G_embedded.number_of_nodes())
+    print("Node names:", list(G_embedded.nodes())[:5])
+    # Convert numpy array coordinates to strings
+    for node in G_embedded.nodes():
+        if 'coords' in G_embedded.nodes[node]:
+            coords = G_embedded.nodes[node]['coords']
+            G_embedded.nodes[node]['coords'] = ','.join(map(str, coords.tolist()))
+    
+    nx.write_gml(G_embedded, os.path.join(data_dir, 'amazon_cosine_videoDVD.gml'))
+    # Now each node G_embedded.nodes[asin]['coords'] is a length-16 unit vector.

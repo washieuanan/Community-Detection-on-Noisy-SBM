@@ -15,7 +15,7 @@ from algorithms.bp.old.duo_bp import (
 # from experiments.community_detection.bp.bethe_duo_bp import (
 #     duo_bp
 # )
-from algorithms.duo_spec import duo_spec, duo_bprop
+from algorithms.duo_spec import duo_spec
 import os
 import json
 import logging
@@ -200,9 +200,13 @@ def combine_processed_graphs(processed_graphs: List[nx.Graph], original_graph: n
     return combined_G
 
 if __name__ == "__main__":
-    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    # G = nx.read_gml(os.path.join(data_dir, "amz_bookmusic.gml"))
     print("Loading graph")
-    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    G = nx.read_gml(os.path.join(data_dir, "amz_allviddvd.gml"))
     G = coords_str2arr(G)
     
     print(f"Original graph has {len(G)} nodes and {len(G.edges())} edges")

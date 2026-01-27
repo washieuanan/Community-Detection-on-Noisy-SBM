@@ -61,10 +61,13 @@ def connect_components(G: nx.Graph, weight: float = 1e-3) -> None:
             G.add_edge(u, v, weight=weight)
 
 if __name__ == "__main__":
-
-    # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml") # 40k+ nodes
-    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")  # 2k nodes 
-    G = nx.read_gml("amazon_metadata_test/amazon_hamming_videoDVD.gml")
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    # G = nx.read_gml(os.path.join(data_dir, "amz_allviddvd.gml"))  # 40k+ nodes
+    # G = nx.read_gml(os.path.join(data_dir, "amz_bookmusic.gml"))  # 2k nodes 
+    G = nx.read_gml(os.path.join(data_dir, "amazon_hamming_videoDVD.gml"))
     G = coords_str2arr(G)
     print(nx.is_connected(G))
     print(nx.number_connected_components(G))

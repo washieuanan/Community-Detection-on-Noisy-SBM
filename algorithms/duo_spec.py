@@ -3,6 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 import math
 import random
+from typing import Dict, Iterable, Tuple, Union
 
 # NumPy and SciPy
 import numpy as np
@@ -15,7 +16,7 @@ from scipy.sparse import coo_matrix, csr_matrix, diags, identity
 from scipy.sparse import linalg as splinalg
 import scipy.sparse.linalg as sla
 from scipy.sparse.linalg import eigs, eigsh, LinearOperator, lobpcg
-from scipy.sparse.csgraph import laplacian as cs_lap, shortest_path
+from scipy.sparse.csgraph import laplacian as cs_lap
 from scipy.stats import mode, permutation_test
 
 # NetworkX
@@ -24,7 +25,6 @@ import networkx as nx
 # Scikit-learn
 from sklearn.cluster import KMeans
 from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.neighbors import KernelDensity
 
 from algorithms.spectral_ops.attention import byoe_embedding, motif_spectral_embedding
 
@@ -173,117 +173,6 @@ def _edge_same_prob(bel: np.ndarray, iu, iv) -> np.ndarray:
     return np.einsum("ij,ij->i", bel[iu], bel[iv])
 
 
-def weighted_percentile(x, q, w=None):
-    """
-    Percentile that respects optional weights.
-
-    Parameters
-    ----------
-    x : 1-D data
-    q : percentile 0–100
-    w : same length weights (defaults to 1)
-
-    Returns
-    -------
-    float – value 'v' s.t.  q percent of weighted mass lies below v.
-    """
-    x = np.asarray(x, float)
-    if w is None:
-        w = np.ones_like(x)
-    else:
-        w = np.asarray(w, float)
-
-    idx = np.argsort(x)
-    x, w = x[idx], w[idx]
-    cdf = np.cumsum(w)
-    cdf /= cdf[-1]
-    return np.interp(q / 100.0, cdf, x)
-
-
-def _scale_or_prune(
-    G: nx.Graph,
-    mask: np.ndarray,
-    probs: np.ndarray,
-    lam: float,
-    w_min: float,
-) -> int:
-    """
-    Edge re-weighting / pruning helper – identical logic, just tidied.
-    """
-    edges = np.asarray(G.edges(), dtype=object)
-    n_removed = 0
-    for (u, v), m, p in zip(edges, mask, probs):
-        if not m:
-            continue
-        dat = G[u][v]
-        if dat.get("ghost"): 
-            continue
-        if dat.get("ghost_knn"):
-            continue
-        w = G[u][v].get("weight", 1.0)
-        w *= 1.0 - lam * p        # shrink
-        if w < w_min:
-            G.remove_edge(u, v)
-            n_removed += 1
-        else:
-            G[u][v]["weight"] = w
-    return n_removed
-
-def _largest_nb_eig(G, nodes, max_iter=200, tol=1e-5, seed=42):
-    """
-    Power-iteration for the leading eigenvalue of the non-backtracking matrix
-    without materialising it explicitly (O(|E|) memory).
-    """
-    rng   = np.random.default_rng(seed)
-    m     = G.number_of_edges()
-    # directed edge list -------------------------------------------------
-    edges = []
-    for u, v in G.edges():
-        edges.append((u, v))
-        edges.append((v, u))
-    e2idx = {e: i for i, e in enumerate(edges)}
-    idx2e = edges
-    n_dir = len(edges)
-
-    nbr = [[] for _ in range(n_dir)]
-    for idx, (u, v) in enumerate(idx2e):
-        for w in G.neighbors(v):
-            if w == u:
-                continue            # non-backtracking
-            nbr[idx].append(e2idx[(v, w)])
-
-    x     = rng.standard_normal(n_dir)
-    x    /= norm(x)
-    lam   = 0.0
-    # for _ in range(max_iter):
-    #     x_new = np.zeros_like(x)
-    #     for i, js in enumerate(nbr):
-    #         x_new[i] = x[js].sum()
-    #     lam_new = norm(x_new)
-    #     x_new  /= lam_new
-    #     if abs(lam_new - lam) < tol * lam_new:
-    #         lam = lam_new
-    #         break
-    #     x, lam = x_new, lam_new
-    for _ in range(max_iter):
-        x_new.fill(0.0)
-        for i, js in enumerate(nbr):
-            if js:                     
-                x_new[i] = x[js].sum()
-
-        lam_new = norm(x_new)
-        if lam_new < 1e-12:       
-            x = rng.standard_normal(n_dir)
-            x /= norm(x)
-            continue            
-
-        x_new /= lam_new
-        if abs(lam_new - lam) < tol * lam_new:
-            return lam_new     
-        x, lam = x_new, lam_new
-
-    return lam     
-
 def _conf_from_center(X, mu):
     """
     Confidence matrix Q[i,c] = 1 / (1 + ||x_i − μ_c||_2)
@@ -349,146 +238,6 @@ def bethe_hessian(
     return Q, hard, node2idx, idx2node
 
 
-def dwpe(
-    H_obs                   : nx.Graph,
-    q                       : int,
-    *,
-    L                       : int   = 3,      # max walk length
-    alpha                   : float = 0.6,    # geometric decay for longer walks
-    weight_from_dist        : bool  = True,   # optional Gaussian edge re-weight
-    sigma_scale             : float = 1.0,    # bandwidth multiplier
-    random_state            : int   = 42,
-):
-    """
-    Distance-Weighted Path-Expansion (DWPE) spectral embedding.
-
-    Parameters
-    ----------
-    H_obs : nx.Graph
-        Observed (possibly weighted) sub-graph that DuoSpec provides each iteration.
-        If edges carry attribute 'dist', a Gaussian kernel is applied.
-    q : int
-        Expected number of communities.
-    L : int, optional
-        Maximum walk length used in the expansion.  L=2 or 3 is usually plenty.
-    alpha : float, optional
-        Geometric decay factor (0<alpha<1) penalising longer walks.
-    weight_from_dist : bool, optional
-        If True and edge attribute 'dist' exists, converts distances to weights.
-    sigma_scale : float, optional
-        Multiplier on the median distance to set the Gaussian bandwidth σ.
-    random_state : int, optional
-        KMeans reproducibility.
-
-    Returns
-    -------
-    Q    : (n,q) soft assignments (rows sum to 1)
-    hard : np.ndarray, shape (n,)
-        Hard labels = argmax(Q,1)
-    node2idx / idx2node : mapping <-> index
-    """
-
-    nodes      = list(H_obs.nodes())
-    node2idx   = {u: i for i, u in enumerate(nodes)}
-    idx2node   = {i: u for u, i in node2idx.items()}
-    n          = len(nodes)
-
-    if weight_from_dist:
-        d_vals = np.array([d.get("dist", 1.0) for _, _, d in H_obs.edges(data=True)])
-        sigma  = (np.median(d_vals) or 1.0) * sigma_scale
-        for u, v, d in H_obs.edges(data=True):
-            if "dist" in d:
-                d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
-            else:
-                d["weight"] = 1.0
-    else:
-        for _, _, d in H_obs.edges(data=True):
-            d["weight"] = d.get("weight", 1.0)
-
-    A = nx.to_scipy_sparse_array(
-        H_obs, nodelist=nodes, format="csr", weight="weight", dtype=float
-    )
-
-    B = A.copy()               
-    A_power = A.copy()
-
-    for ℓ in range(2, L + 1):
-        A_power = A_power @ A  
-        B += (alpha ** (ℓ - 1)) * A_power 
-
-    deg = np.array(B.sum(axis=1)).ravel()
-    D_inv_sqrt = diags(np.power(deg, -0.5, where=deg > 0))
-    S = D_inv_sqrt @ B @ D_inv_sqrt      
-
-    k = q                        
-    ncv = 2 * min(n - 1, max(2*k + 1, k + 20))
-    vals, vecs = eigsh(S, k=k, which="LA", ncv=ncv)
-
-    km    = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
-    hard  = km.labels_
-    mu    = km.cluster_centers_
-
-    Q = _conf_from_center(vecs, mu)
-
-    return Q, hard, node2idx, idx2node
-
-def bethe_hessian_fast(
-    H_obs                : nx.Graph,
-    q                    : int,
-    *,
-    weight_from_dist     : bool    = True,
-    sigma_scale          : float   = 1.0,
-    use_lobpcg           : bool    = True,
-    tol                  : float   = 1e-3,
-    maxiter              : int     = 200,
-    random_state         : int     = 42,
-    prev_evecs           : np.ndarray = None,
-):
-    """
-    Fast Bethe–Hessian embedding via LOBPCG or warm-started ARPACK.
-    """
-    nodes    = list(H_obs.nodes())
-    idx      = {u:i for i,u in enumerate(nodes)}
-    n        = len(nodes)
-
-    if weight_from_dist:
-        d_vals = np.array([d.get("dist",1.0) for *_,d in H_obs.edges(data=True)])
-        sigma  = max(np.median(d_vals), 1.0) * sigma_scale
-        for u,v,d in H_obs.edges(data=True):
-            d["weight"] = np.exp(-0.5*(d.get("dist",1.0)/sigma)**2)
-
-    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes,
-                                   weight="weight", format="csr")
-    deg = np.ravel(A.sum(axis=1))
-    D   = diags(deg)
-
-    r = np.sqrt(deg.mean())
-
-    I  = diags(np.ones(n))
-    Hr = (r*r - 1.0)*I - r*A + D
-
-    if use_lobpcg:
-        X0 = (prev_evecs 
-              if (prev_evecs is not None and prev_evecs.shape==(n,q))
-              else np.random.RandomState(random_state).randn(n,q))
-        vals, vecs = lobpcg(Hr, X0, tol=tol, maxiter=maxiter)
-    else:
-
-        eig_kwargs = dict(which="SM", tol=tol, maxiter=maxiter)
-        if prev_evecs is not None:
-            eig_kwargs["v0"] = prev_evecs[:,0]
-        vals, vecs = eigsh(Hr, k=q, **eig_kwargs)
-
-    km   = KMeans(n_clusters=q, n_init=10, random_state=random_state).fit(vecs)
-    hard = km.labels_
-    mu   = km.cluster_centers_
-    diff = vecs[:,None,:] - mu[None,:,:]       # shape (n,q,q)
-    Q    = np.exp(-np.sum(diff**2, axis=2))
-    Q   /= Q.sum(axis=1, keepdims=True)
-
-    return Q, hard, idx, {i:u for u,i in idx.items()}, vecs
-
-
 def laplacian(
     H_obs        : nx.Graph,
     q            : int,
@@ -505,7 +254,7 @@ def laplacian(
     n        = len(nodes)
 
     A = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
-    L = csgraph.laplacian(A, normed=True)
+    L = cs_lap(A, normed=True)
 
     m   = q + 1
     ncv = min(n - 1, max(2 * (m + 20), 10 * m))
@@ -531,61 +280,12 @@ def laplacian(
     return Q, hard, node2idx, idx2node
 
 
-def regularized_laplacian(
-    H_obs        : nx.Graph,
-    q            : int,
-    *,
-    random_state : int = 42,
-):
-    """
-    Spectral clustering on the regularized Laplacian
-      L_reg = (D + τI)^(-1/2) A (D + τI)^(-1/2),
-    using ARPACK to get the top-q eigenvectors.
-    """
-    nodes    = list(H_obs.nodes())
-    node2idx = {u: i for i, u in enumerate(nodes)}
-    idx2node = {i: u for u, i in node2idx.items()}
-    n        = len(nodes)
-
-    A   = nx.to_scipy_sparse_array(H_obs, nodelist=nodes, format="csr")
-    deg = np.array(A.sum(axis=1)).ravel()
-
-    tau     = 1.0
-    D_inv_s = sp.diags(1.0 / np.sqrt(deg + tau))
-
-    L_reg = D_inv_s @ A @ D_inv_s
-
-    m   = q
-    ncv = min(n - 1, max(m + 20, 5 * m))
-
-    evals, evecs = eigsh(
-        L_reg,
-        k=m,
-        which="LA",
-        ncv=ncv,
-        tol=1e-4,
-        maxiter=10000
-    )
-
-    X = evecs
-
-    km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(X)
-    hard = km.labels_
-    mu   = km.cluster_centers_
-    Q    = _conf_from_center(X, mu)
-
-    return Q, hard, node2idx, idx2node
-
-
 def get_callable(calls: Union[Tuple, str]):
     func_dict = {
         "bethe_hessian":     bethe_hessian,
         "laplacian":         laplacian,
-        "regularized_laplacian": regularized_laplacian,
-        "bethe_hessian_fast": bethe_hessian_fast,
-        'byoe_embedding': byoe_embedding,
-        'motif': motif_spectral_embedding, 
-        "dwpe":              dwpe,
+        "byoe_embedding":    byoe_embedding,
+        "motif":             motif_spectral_embedding, 
     }
     if isinstance(calls, str):
         return (func_dict[calls], func_dict[calls])
@@ -720,10 +420,6 @@ def duo_spec(
     best, hist, no_imp = {"obj": -np.inf}, [], 0
     config = get_callable(config)
 
-    # def _lam(step, base):            # linear ramp-up after warm-up
-    #     d = step - warmup_rounds
-    #     if d <= 0:  return 0.0
-    #     return base if d >= anneal_steps else base * d / anneal_steps
     def _lam(step, base, warmup_rounds=0, anneal_steps=anneal_steps):
         if step < warmup_rounds:           # ❶ pure warm-up
             return 0.0
@@ -818,17 +514,6 @@ def duo_spec(
         history=hist,
         G_final=subG,
     )
-    
-    # return dict(
-    #     beliefs=best["beliefs"],
-    #     communities=hard_final,
-    #     balls=best["balls"],
-    #     node2idx=best["node2idx"],
-    #     idx2node={i: u for u, i in best["node2idx"].items()},
-    #     history=hist,
-    #     G_final=subG,
-    # )
-
 
 
 def detection_stats(preds: np.ndarray, true: np.ndarray, *, n_perm: int = 10_000):
@@ -871,25 +556,6 @@ if __name__ == "__main__":
     from block_models.sbm.sbm import generate_noisy_sbm
     from deprecated.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
     from algorithms.bp.vectorized_bp import belief_propagation, beta_param
-    # G_true = generate_gbm_poisson(lam=50, K=K, a=a, b=b, seed=42)
-# {"parameters": {"n": 650, "K": 2, "a": 40, "b": 6, "p_in": 0.39858291463936507, "p_out": 0.05978743719590476, "sigma": 0.75},
-    # G_true = generate_noisy_sbm(
-    #     n=650,
-    #     K=2,
-    #     p_in=0.39858291463936507,
-    #     p_out=0.05978743719590476,
-    #     sigma=0.90,
-    #     seed=42
-    # )
-    # G_true = generate_noisy_sbm(
-    #     n=400,
-    #     K=2,
-    #     p_in=1,
-    #     p_out=0.1,
-    #     sigma=0.75,
-    #     seed=42
-    # )
-# {"parameters": {"n": 300, "K": 2, "a": 55, "b": 6, "p_in": 1.0456934536869702, "p_out": 0.11407564949312402, "sigma": 0.5}    
     G_true = generate_noisy_sbm(
         n=300,
         K=2,
@@ -900,7 +566,6 @@ if __name__ == "__main__":
     )
     print("Generated graph with", len(G_true.nodes()), "nodes and", len(G_true.edges()), "edges")
 
-    # subG = geometric_censor(G_true, r=0.5, seed=42)
     duo_params = dict(
     K               = 2,
     num_balls       = 8,    

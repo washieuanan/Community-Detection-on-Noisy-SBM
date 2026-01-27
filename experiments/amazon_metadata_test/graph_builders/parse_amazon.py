@@ -74,8 +74,12 @@ def parse_amazon_meta(path):
 
 if __name__ == '__main__':
     import json
-    import os  
+    import os
     
-    products = parse_amazon_meta('amazon_metadata_test/amazon-meta.txt')
-    with open('amazon_metadata_test/parsed_amazon_meta.json', 'w', encoding='utf-8') as f:
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    products = parse_amazon_meta(os.path.join(data_dir, 'amazon-meta.txt'))
+    with open(os.path.join(data_dir, 'parsed_amazon_meta.json'), 'w', encoding='utf-8') as f:
         json.dump(products, f, indent=2)

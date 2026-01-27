@@ -7,7 +7,7 @@ from networkx.readwrite import json_graph
 import numpy as np
 
 from block_models.cbsm.sbm import generate_sbm
-from algorithms.duo_spec import duo_spec, get_true_communities, detection_stats, erdos_renyi_mask, duo_bprop
+from algorithms.duo_spec import duo_spec, get_true_communities, detection_stats, erdos_renyi_mask
 from community_detection.bp.vectorized_bp import belief_propagation
 from block_models.cbsm.motif import motif_counting_community_detection
 from block_models.cbsm.spectral import spectral_clustering_community_detection
@@ -131,19 +131,6 @@ for rho in rho_values:
             }
         except Exception as e:
             results['duo_spec'] = {'error': str(e)}
-
-        # Duo Bprop
-        try:
-            db_res = duo_bprop(G_masked, K=K)
-            db_preds = db_res.get('communities')
-            true_labels_db = get_true_communities(G_true, node2idx=None, attr="comm")
-            stats_db = detection_stats(db_preds, true_labels_db)
-            results['duo_bprop'] = {
-                'stats': stats_db,
-                'preds': db_preds
-            }
-        except Exception as e:
-            results['duo_bprop'] = {'error': str(e)}
 
         # Build output JSON
         output = {

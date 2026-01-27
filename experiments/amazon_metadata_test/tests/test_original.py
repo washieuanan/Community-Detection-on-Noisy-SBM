@@ -12,7 +12,7 @@ from algorithms.bp.old.duo_bp import (
     create_dist_observed_subgraph,
 )
 
-from algorithms.duo_spec import duo_spec, duo_bprop
+from algorithms.duo_spec import duo_spec
 import os
 import json
 import logging
@@ -43,8 +43,11 @@ def coords_str2arr(G: nx.Graph, dim = 16):
     return new_G
 
 if __name__ == "__main__":
-
-    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    
+    G = nx.read_gml(os.path.join(data_dir, "amz_allviddvd.gml"))
     G = coords_str2arr(G)
 
 
