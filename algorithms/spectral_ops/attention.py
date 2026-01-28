@@ -149,9 +149,14 @@ def motif_spectral_embedding(
     nodes     = list(H_obs.nodes())
     node2idx  = {u:i for i,u in enumerate(nodes)}
     idx2node  = {i:u for u,i in node2idx.items()}
-    # compute average edge weight in H_obs
-    weights = [d.get('weight', 1.0) for _, _, d in H_obs.edges(data=True)]
-    avg_weight = sum(weights) / len(weights) if weights else 0
+    # compute average edge weight in H_obs using explicit 'weight' attributes
+    edges_with_data = list(H_obs.edges(data=True))
+    weights = [float(d["weight"]) for _, _, d in edges_with_data if "weight" in d]
+    if weights:
+        avg_weight = sum(weights) / len(weights)
+    else:
+        # If no explicit weights, treat all edges as weight=1.0 for reporting.
+        avg_weight = 1.0 if edges_with_data else 0.0
     print(f"Average edge weight in H_obs: {avg_weight:.4f}")
     # --- 1) get Z embeddings -----------------------------------------------
     Z = pmi_svd_embeddings(
