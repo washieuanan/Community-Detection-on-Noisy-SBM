@@ -1,15 +1,26 @@
+# ───────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-from typing import Dict
+import random
+import itertools
+from typing   import List, Tuple, Dict
 
 import numpy  as np
 import networkx as nx
 import scipy.sparse as sp
-from scipy.sparse.linalg import eigsh, lobpcg
+from scipy.sparse.linalg import eigsh
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import normalize
+from tqdm.auto import tqdm
+import torch
+from collections import Counter
+from itertools import islice
+from random import choices, randint
+from scipy.sparse import lil_matrix
+from scipy.sparse.linalg import svds
+from scipy.sparse import lil_matrix, csr_matrix
+from sklearn.decomposition import TruncatedSVD
 from sklearn.cluster import KMeans
-
-from .pmi_funcs import grab_pmi_func
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1.  DeepWalk random-walk corpus
@@ -25,7 +36,80 @@ def _conf_from_center(X, mu):
     Q    /= Q.sum(axis=1, keepdims=True)
     return Q
 
-pmi_svd_embeddings = grab_pmi_func(fast=False, weighted=False)  # ADJUST SETTINGS HERE
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2.  SGNS / word2vec embeddings  ≈  shifted PPMI factorisation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+
+
+def pmi_svd_embeddings(
+    G              : nx.Graph,
+    dim            : int   = 64,
+    *,
+    walk_len       : int   = 60,
+    num_walks      : int   = 15,
+    window         : int   = 10,
+    seed           : int   = 42,
+) -> dict[str, np.ndarray]:
+    """
+    Return dict {node-id (str) -> ℝ^dim embedding} using
+    PPMI -> rank-dim randomized SVD via TruncatedSVD.
+    """
+    rng     = random.Random(seed)
+    nodes   = list(G.nodes())
+    n       = len(nodes)
+    node2i  = {u: i for i, u in enumerate(nodes)}
+
+    # --- Build a sparse co-occurrence matrix ------------------------------
+    C = lil_matrix((n, n), dtype=np.float32)
+    for _ in range(num_walks):
+        rng.shuffle(nodes)
+        for start in nodes:
+            walk = [start]
+            for _ in range(walk_len - 1):
+                nbrs = list(G.neighbors(walk[-1]))
+                if not nbrs:
+                    break
+                walk.append(rng.choice(nbrs))
+            for i, u in enumerate(walk):
+                ui = node2i[u]
+                for j in range(max(0, i - window), min(len(walk), i + window + 1)):
+                    if i != j:
+                        vi = node2i[walk[j]]
+                        C[ui, vi] += 1.0
+    C = C.tocsr()
+
+    # --- Compute PPMI ------------------------------------------------------
+    row_sum = np.asarray(C.sum(axis=1)).ravel()
+    col_sum = np.asarray(C.sum(axis=0)).ravel()
+    total   = row_sum.sum() + 1e-9
+    # formula: PPMI = max(log((count * total)/(row_sum*col_sum)) - log(neg_samples), 0)
+    # shift = 1.0
+    # C.data = np.log((C.data * total) /
+    #             (row_sum[C.indices] * col_sum[C.indices]) + 1e-9) - np.log(shift)
+    C.data = np.log(C.data * total / (row_sum[C.indices] * col_sum[C.indices] + 1e-9) + 1e-9)
+    C.data = np.clip(C.data, 0, None)
+
+    # mask = C.data > 0.5
+    # C.data, C.indices, C.indptr = C.data[mask], C.indices[mask], C.indptr
+
+    # --- Randomized SVD via TruncatedSVD -----------------------------------
+    svd = TruncatedSVD(
+        n_components=dim,
+        n_iter=7,
+        random_state=seed
+    )
+    Z = svd.fit_transform(C)
+    # Optionally scale by sqrt of singular values: embed = U * S^0.5
+    # but TruncatedSVD returns U * Sigma, so we take Z directly.
+
+    return {str(nodes[i]): Z[i] for i in range(n)}
+
+
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3.  Attention Laplacian  H = D^{-1/2}  softmax(Z Zᵀ/√d | edges)  D^{-1/2}
@@ -34,8 +118,22 @@ def attention_laplacian(
     G        : nx.Graph,
     Z        : Dict[str, np.ndarray],   # node-id → embedding vec
     clip_max : float = 1e2,
+    *,
+    # Evaluation-time option: scale attention by existing edge weights.
+    use_edge_weights: bool = False,
+    weight_key: str = "weight",
+    weight_pow: float = 1.0,
+    weight_floor: float = 0.0,
+    weight_cap: float | None = None,
 ) -> sp.csr_matrix:
-    """Return sparse symmetric PSD operator H_{BYOE}."""
+    """
+    Return sparse symmetric PSD operator H_{BYOE}.
+
+    If `use_edge_weights=True`, multiply the attention weight on each edge (u,v)
+    by a monotone function of the graph's edge weight G[u][v][weight_key],
+    after optional clipping and exponentiation. This lets DuoSpec/GeoDe's
+    reweighted graph influence BYOE without changing embeddings.
+    """
     n      = G.number_of_nodes()
     node2i = {u: i for i, u in enumerate(G.nodes())}
 
@@ -50,9 +148,26 @@ def attention_laplacian(
     scale  = 1.0 / np.sqrt(dim)
 
     for u, v in G.edges():
-        i, j   = node2i[u], node2i[v]
-        weight = np.exp( np.clip(scale * dot[i, j], a_min=None, a_max=np.log(clip_max)) )
-        iu.append(i); iv.append(j); data.append(weight)
+        i, j = node2i[u], node2i[v]
+        base = np.exp(
+            np.clip(scale * dot[i, j], a_min=None, a_max=np.log(clip_max))
+        )
+
+        if use_edge_weights:
+            d = G[u][v]
+            w_e = float(d.get(weight_key, 1.0))
+            # Clamp and apply power – monotone transform in w_e.
+            w_e = max(weight_floor, w_e)
+            if weight_cap is not None:
+                w_e = min(weight_cap, w_e)
+            w_e = w_e ** weight_pow
+            weight = base * w_e
+        else:
+            weight = base
+
+        iu.append(i)
+        iv.append(j)
+        data.append(weight)
 
     W = sp.coo_matrix((data, (iu, iv)), shape=(n, n))
     W = W + W.T
@@ -61,68 +176,83 @@ def attention_laplacian(
     H = Dinv_half @ W @ Dinv_half        # CSR
     return H.tocsr()
 
+
+
 def motif_attention_laplacian(
     H_obs        : nx.Graph,
     Z            : dict,          # node-id -> embedding vector
     *,
-    beta         : float  = 0.3,  # mix factor for motif weights
-    clip_max     : float  = 1e2,  # cap for exp(.) to avoid overflow
-    weight_pow   : float  = 1.0,  # NEW: exponent applied to edge weights
-    weight_eps   : float  = 1e-12,# NEW: avoids zeroing very small weights
-    random_state : int    = 42,
-    gamma        : float  = 0.5, 
+    beta         : float = 0.3,   # how much to mix in the motif weights
+    clip_max     : float = 1e2,   # cap for the base attention exp()
+    random_state : int   = 42,
+    # Evaluation-time option: scale attention by existing edge weights.
+    use_edge_weights: bool = False,
+    weight_key: str = "weight",
+    weight_pow: float = 1.0,
+    weight_floor: float = 0.0,
+    weight_cap: float | None = None,
 ) -> sp.csr_matrix:
     """
-    motif attention laplacian with weights -- should still work without weights but haven't tested
+    Build a triangle-motif–enhanced Attention-Laplacian.
+
+    1. Compute base attention weights W_uv = exp(<z_u,z_v>/sqrt(d)) for (u,v) in edges.
+    2. Let W2 = W @ W  (weighted 2-hop counts).
+    3. Extract motif weights: M = W.multiply(W2)  (only on original edges).
+    4. Mix: W_mix = (1-beta)*W + beta*M.
+    5. Degree-normalize: H = D^{-1/2} W_mix D^{-1/2}.
+
+    If `use_edge_weights=True`, each base attention W_uv is further scaled
+    by a monotone function of the existing edge weight H_obs[u][v][weight_key],
+    after optional clipping and exponentiation. This allows DuoSpec/GeoDe
+    reweighted graphs to influence motif embeddings.
     """
-    rng      = np.random.RandomState(random_state)
-    nodes    = list(H_obs.nodes())
-    node2i   = {u: i for i, u in enumerate(nodes)}
-    n        = len(nodes)
+    rng = np.random.RandomState(random_state)
+    nodes   = list(H_obs.nodes())
+    node2i  = {u:i for i,u in enumerate(nodes)}
+    n       = len(nodes)
 
-    # 1) base attention W with edge-weight factor
-    d_emb  = next(iter(Z.values())).shape[0]
-    scale  = 1.0 / np.sqrt(d_emb)
-
+    # 1) build base attention W
+    #    assume Z is dict node->np.array(d,)
+    d_emb    = next(iter(Z.values())).shape[0]
+    scale    = 1.0/np.sqrt(d_emb)
     iu, iv, data = [], [], []
-    for u, v, d in H_obs.edges(data=True):
+    for u, v in H_obs.edges():
         i, j = node2i[u], node2i[v]
         zu, zv = Z[str(u)], Z[str(v)]
-        # score  = np.dot(zu, zv) * scale
-        # att    = np.exp(np.clip(score, a_min=None,
-        #                         a_max=np.log(clip_max)))
+        score = np.dot(zu, zv) * scale
+        base = np.exp(np.clip(score, a_min=None, a_max=np.log(clip_max)))
 
-        # # ----------  ★ incorporate the stored edge weight  ---------------
-        # w_edge = float(d.get("weight", 1.0))
-        # w_edge = max(w_edge, weight_eps)          # avoid exact 0
-        # att   *= w_edge ** weight_pow
-        # # -----------------------------------------------------------------
-        score    = np.dot(zu, zv) * scale
-        w_edge   = float(d.get("weight", 1.0))
-        w_edge   = max(w_edge, weight_eps)
-        log_w    = np.log(w_edge)
-        gated    = score + gamma * log_w
-        att      = np.exp(np.clip(gated,
-                                   a_min=None,
-                                   a_max=np.log(clip_max)))
-        iu.append(i); iv.append(j); data.append(att)
+        if use_edge_weights:
+            d = H_obs[u][v]
+            w_e = float(d.get(weight_key, 1.0))
+            w_e = max(weight_floor, w_e)
+            if weight_cap is not None:
+                w_e = min(weight_cap, w_e)
+            w_e = w_e ** weight_pow
+            w = base * w_e
+        else:
+            w = base
 
-    W = sp.coo_matrix((data, (iu, iv)), shape=(n, n)).tocsr()
-    W = W + W.T                                    # undirected
+        iu.append(i)
+        iv.append(j)
+        data.append(w)
+    W = sp.coo_matrix((data,(iu,iv)),shape=(n,n)).tocsr()
+    W = W + W.T  # symmetric
 
-    # 2) two-hop (triangle) counts
-    W2 = W @ W                                     # sparse matmul
+    # 2) compute 2-hop weighted counts
+    W2 = W.dot(W)    # (n×n) sparse, entry (i,j)=sum_k W[i,k]*W[k,j]
 
-    # 3) motif weights on original edges
-    M  = W.multiply(W2)
+    # 3) motif weights on original edges: M_ij = W_ij * W2_ij
+    M = W.multiply(W2)  # keeps only those (i,j) where W_ij>0
 
-    # 4) mix
+    # 4) mix them
     W_mix = (1.0 - beta) * W + beta * M
 
-    # 5) symmetric normalisation
+    # 5) build normalized Laplacian
     deg = np.array(W_mix.sum(axis=1)).ravel() + 1e-9
-    D_inv_sqrt = sp.diags(1.0 / np.sqrt(deg))
+    D_inv_sqrt = sp.diags(1.0/np.sqrt(deg))
     H = D_inv_sqrt @ W_mix @ D_inv_sqrt
+
     return H.tocsr()
 
 
@@ -137,7 +267,10 @@ def motif_spectral_embedding(
     num_walks    : int   = 20,
     window       : int   = 10,
     random_state : int   = 42,
-    weight_pow   : float = 1.0,
+    # Allow DuoSpec/GeoDe weights to influence motif attention.
+    use_edge_weights: bool = False,
+    weight_key: str = "weight",
+    weight_pow: float = 1.0,
 ) -> tuple[np.ndarray,np.ndarray,dict,dict]:
     """
     1) Build node embeddings Z via PPMI+SVD (pure NumPy).
@@ -149,15 +282,7 @@ def motif_spectral_embedding(
     nodes     = list(H_obs.nodes())
     node2idx  = {u:i for i,u in enumerate(nodes)}
     idx2node  = {i:u for u,i in node2idx.items()}
-    # compute average edge weight in H_obs using explicit 'weight' attributes
-    edges_with_data = list(H_obs.edges(data=True))
-    weights = [float(d["weight"]) for _, _, d in edges_with_data if "weight" in d]
-    if weights:
-        avg_weight = sum(weights) / len(weights)
-    else:
-        # If no explicit weights, treat all edges as weight=1.0 for reporting.
-        avg_weight = 1.0 if edges_with_data else 0.0
-    print(f"Average edge weight in H_obs: {avg_weight:.4f}")
+
     # --- 1) get Z embeddings -----------------------------------------------
     Z = pmi_svd_embeddings(
         H_obs,
@@ -165,29 +290,24 @@ def motif_spectral_embedding(
         walk_len=walk_len,
         num_walks=num_walks,
         window=window,
-        seed=random_state,
-        weight_pow=weight_pow
+        seed=random_state
     )
-    # Calculate and print average element in Z embeddings
-    Z_values = np.array(list(Z.values()))
-    avg_Z = np.mean(Z_values)
-    print(f"Average element in Z embeddings: {avg_Z:.4f}")
 
-    print("Finished PPMI-SVD embeddings")
-    # --- 2) build motif‐attention Laplacian -------------------------------
+    # --- 2) build motif‐attention Laplacian (optionally scaled by edge weights)
     H = motif_attention_laplacian(
         H_obs,
         Z,
         beta=beta,
         clip_max=clip_max,
         random_state=random_state,
-        weight_pow=weight_pow
+        use_edge_weights=use_edge_weights,
+        weight_key=weight_key,
+        weight_pow=weight_pow,
     )
-    print("Finished motif-attention Laplacian")
+
     # --- 3) spectral clustering -------------------------------------------
     ncv = 2 * min(H.shape[0]-1, max(2*q+1, q+20))
     vals, vecs = eigsh(H, k=q, which="LA", ncv=ncv, tol=1e-4)
-
 
     km   = KMeans(n_clusters=q, n_init=20, random_state=random_state).fit(vecs)
     hard = km.labels_
@@ -255,6 +375,8 @@ def motif_laplacian_spectral_embedding(
     return Q, hard, node2idx, idx2node
 
 
+
+
 def byoe_embedding(
     H_obs        : nx.Graph,
     q            : int,
@@ -264,6 +386,10 @@ def byoe_embedding(
     num_walks    : int   = 10,
     window       : int   = 5,
     random_state : int   = 42,
+    # Allow DuoSpec/GeoDe weights to influence BYOE via attention.
+    use_edge_weights: bool = False,
+    weight_key: str = "weight",
+    weight_pow: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str,int], dict[int,str]]:
     """
     BYOE spectral clustering based on (DeepWalk ➜ PPMI ➜ TruncatedSVD).
@@ -284,8 +410,14 @@ def byoe_embedding(
         seed=random_state
     )
 
-    # (C) Attention Laplacian
-    H = attention_laplacian(H_obs, Z_dict)
+    # (C) Attention Laplacian (optionally scaled by edge weights)
+    H = attention_laplacian(
+        H_obs,
+        Z_dict,
+        use_edge_weights=use_edge_weights,
+        weight_key=weight_key,
+        weight_pow=weight_pow,
+    )
 
     # (D) spectral embedding
     ncv = 2 * min(H.shape[0] - 1, max(2*q + 1, q + 20))

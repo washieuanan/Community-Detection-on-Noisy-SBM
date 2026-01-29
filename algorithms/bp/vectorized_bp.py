@@ -456,13 +456,11 @@ def belief_propagation_weighted(
         try:
             delta = np.max(np.abs(messages - messages_old))
             if np.isnan(delta):
-                print("[BP] Warning: NaN values detected, increasing damping")
                 damping = min(damping * 1.5, 0.9)
                 messages[:] = messages_old
                 continue
         except ValueError as e:
             if "zero-size array" in str(e):
-                print("[BP] Warning: Zero-size array in delta calculation, aborting loop")
                 delta = 0.0
                 break
             else:
