@@ -25,6 +25,10 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neighbors import KernelDensity
 
 
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
 def create_dist_observed_subgraph(num_coords, observations):
     """
     create subgraph containing all nodes and observed paths as edges
@@ -191,9 +195,9 @@ def geometry_scores_fineblob_persistence(
     scores_local: np.ndarray,
     node2idx: Dict[Any, int],
     *,
-    frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95),
+    frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95, 0.90, 0.85),
     fine_frac: float = 0.99,
-    S0: int = 20,
+    S0: int = 30,
     stable_k: int = 3,
     debug: bool = False,
 ) -> Dict[str, np.ndarray]:
@@ -432,6 +436,73 @@ def build_blob_supergraph(
     blob_weights = np.array(list(agg.values()), dtype=float)
 
     return blob_edges, blob_weights, blob_comp_per_node
+
+
+def compute_soft_psame_from_blob_graph(
+    edges: np.ndarray,
+    node2idx: Dict[Any, int],
+    blob_comp_per_node: np.ndarray,
+    coarse_id_per_node: np.ndarray,
+    blob_edges: np.ndarray,
+    blob_weights: np.ndarray,
+    *,
+    eps: float = 1e-12,
+    temp: float = 1.0,
+    clip_lo: float = -8.0,
+    clip_hi: float = 8.0,
+) -> np.ndarray:
+    """
+    Soft p_same for original edges:
+      - 0 if endpoints in different coarse communities.
+      - 1 if same blob.
+      - Otherwise sigmoid(z) using blob-edge strength between endpoint blobs,
+        normalized by robust within-community stats.
+    """
+    m = len(edges)
+    if m == 0:
+        return np.zeros(0, dtype=float)
+
+    # map (bu,bv)->weight for quick lookup
+    w_map: Dict[Tuple[int, int], float] = {}
+    for (a, b), w in zip(blob_edges, blob_weights):
+        aa = int(a)
+        bb = int(b)
+        if aa == bb:
+            continue
+        key = (aa, bb) if aa < bb else (bb, aa)
+        w_map[key] = float(w)
+
+    # collect log-weights to set robust normalization scale
+    logs: List[float] = []
+    for (_, _), w in zip(blob_edges, blob_weights):
+        logs.append(np.log1p(float(w)))
+    if len(logs) == 0:
+        mu = 0.0
+        mad = 1.0
+    else:
+        logs_arr = np.asarray(logs, dtype=float)
+        mu = float(np.median(logs_arr))
+        mad = float(np.median(np.abs(logs_arr - mu)) + eps)
+
+    # produce soft p_same
+    p_same = np.zeros(m, dtype=float)
+    for i, (u, v) in enumerate(edges):
+        ui = node2idx[u]
+        vi = node2idx[v]
+        if coarse_id_per_node[ui] != coarse_id_per_node[vi]:
+            p_same[i] = 0.0
+            continue
+        bu = int(blob_comp_per_node[ui])
+        bv = int(blob_comp_per_node[vi])
+        if bu == bv:
+            p_same[i] = 1.0
+            continue
+        key = (bu, bv) if bu < bv else (bv, bu)
+        w = float(w_map.get(key, 0.0))
+        z = (np.log1p(w) - mu) / (mad * temp)
+        z = float(np.clip(z, clip_lo, clip_hi))
+        p_same[i] = float(sigmoid(z))
+    return p_same
 
 
 def dsu_exact_k_partition(
@@ -684,8 +755,13 @@ def reweight_edges_from_posteriors(
         # Geometry shrink component (always multiplicative in this implementation).
         delta_geo = -lam_geo_eff * r_eff
 
-        # Community boost component (only if enabled and in same coarse community).
-        if use_comm_boost and ps_clipped > 0.0 and lam_comm_boost_eff > 0.0:
+        # Community boost component (only if enabled and in strong, non-geo communities).
+        if (
+            use_comm_boost
+            and lam_comm_boost_eff > 0.0
+            and ps_clipped >= 0.8
+            and (1.0 - r_clipped) >= 0.8
+        ):
             delta_comm = lam_comm_boost_eff * comm_eff
         else:
             delta_comm = 0.0
@@ -935,7 +1011,7 @@ def proxy_weight_locality_correlation(
                 f"computed_with_jitter_due_to_near_constant_inputs(std_w={std_w:.3e},"
                 f" std_L={std_s:.3e})"
             )
-        else:
+    else:
             reason = (
                 f"near_constant_inputs(std_w={std_w:.3e}, std_L={std_s:.3e})"
             )
@@ -1576,7 +1652,7 @@ def bethe_hessian(
                 continue
             if "dist" in d:
                 d["weight"] = np.exp(-0.5 * (d["dist"] / sigma) ** 2)
-        else:
+            else:
                 d["weight"] = 1.0  # Default weight when dist is not available
     else:
         # Ensure a weight exists but never overwrite existing values.
@@ -1614,6 +1690,9 @@ __all__ = [
     "rescale_graph_weights_for_downstream",
     "compute_initial_avg_degree",
     "prune_degree_preserving_connected",
+    "squash_weights_for_bh",
+    "prune_to_unweighted_for_motif",
+    "postprocess_for_downstream",
 ]
 
 
@@ -1766,6 +1845,288 @@ def prune_degree_preserving_connected(
 
     return H
 
+
+def prune_bottom_quantile_keep_connected(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    prune_frac: float = 0.25,
+    seed: int = 0,
+) -> nx.Graph:
+    """
+    Prune the bottom `prune_frac` fraction of edges by weight while preserving
+    connectivity via a maximum spanning tree (or forest) backbone.
+    Returns a new graph with 0/1 edge weights (all surviving edges weight=1.0).
+    """
+    H = nx.Graph()
+    for u, data in G.nodes(data=True):
+        H.add_node(u, **data)
+
+    m = G.number_of_edges()
+    n = G.number_of_nodes()
+    if n <= 1 or m == 0:
+        return H
+
+    # Maximum spanning forest provides protected edges that preserve connectivity.
+    T = nx.maximum_spanning_tree(G, weight=weight_key, algorithm="kruskal")
+    protected = set()
+    for u, v in T.edges():
+        a = u if u <= v else v
+        b = v if u <= v else u
+        protected.add((a, b))
+
+    edges_all = list(G.edges(data=True))
+    target_remove = int(np.floor(prune_frac * float(m)))
+
+    removable = []
+    for u, v, d in edges_all:
+        a = u if u <= v else v
+        b = v if u <= v else u
+        key = (a, b)
+        if key in protected:
+            continue
+        w = float(d.get(weight_key, 1.0))
+        removable.append((w, a, b))
+
+    # Sort by ascending weight; deterministic tie-breaking by (a,b).
+    removable.sort(key=lambda t: (t[0], t[1], t[2]))
+
+    to_remove = set()
+    for idx, (_, a, b) in enumerate(removable):
+        if idx >= target_remove:
+            break
+        to_remove.add((a, b))
+
+    # Build pruned graph: keep protected + non-removed edges.
+    for u, v, d in edges_all:
+        a = u if u <= v else v
+        b = v if u <= v else u
+        key = (a, b)
+        if key in to_remove:
+            continue
+        attrs = dict(d)
+        attrs[weight_key] = 1.0
+        H.add_edge(u, v, **attrs)
+
+    return H
+
+
+def mst_fill_prune_to_target_mean_degree(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    retain_ratio: float = 0.70,
+    min_mean_degree: float = 1.0,
+) -> nx.Graph:
+    """
+    Build a CONNECTED, UNWEIGHTED (0/1) graph from a weighted graph G by:
+      1) max spanning tree (MaxST) by weight_key (connectivity backbone)
+      2) fill with remaining highest-weight edges until target edge count
+    Target mean degree is computed per-graph:
+      d0 = 2*m0/n,  d_target = max(min_mean_degree, retain_ratio*d0),
+      m_target = round(d_target*n/2), clipped to [n-1, m0].
+    Output edge weights must be 1.0.
+    """
+    H = nx.Graph()
+    for u, data in G.nodes(data=True):
+        H.add_node(u, **data)
+
+    n = G.number_of_nodes()
+    m0 = G.number_of_edges()
+    if n <= 1 or m0 == 0:
+        return H
+
+    d0 = 2.0 * float(m0) / float(n)
+    d_target = max(float(min_mean_degree), float(retain_ratio) * d0)
+    m_target = int(round(d_target * float(n) / 2.0))
+    m_target = max(n - 1, min(m_target, m0))
+
+    # Base maximum spanning forest by weight.
+    T = nx.maximum_spanning_tree(G, weight=weight_key, algorithm="kruskal")
+
+    # Ensure connectivity using best available edges.
+    nodes = list(G.nodes())
+    node2idx = {u: i for i, u in enumerate(nodes)}
+    parent = np.arange(len(nodes), dtype=int)
+    size = np.ones(len(nodes), dtype=int)
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> bool:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            return False
+        if size[ri] < size[rj]:
+            ri, rj = rj, ri
+        parent[rj] = ri
+        size[ri] += size[rj]
+        return True
+
+    for u, v in T.edges():
+        iu = node2idx[u]
+        iv = node2idx[v]
+        union(iu, iv)
+
+    edges_all = []
+    for u, v, d in G.edges(data=True):
+        w = float(d.get(weight_key, 1.0))
+        a = u if u <= v else v
+        b = v if u <= v else u
+        edges_all.append((w, a, b))
+    edges_all.sort(key=lambda t: (-t[0], t[1], t[2]))
+
+    for _, a, b in edges_all:
+        if T.has_edge(a, b):
+            continue
+        ia = node2idx[a]
+        ib = node2idx[b]
+        if union(ia, ib):
+            T.add_edge(a, b, **G[a][b])
+        # Early exit if already connected.
+        roots = {find(i) for i in range(len(nodes))}
+        if len(roots) == 1:
+            break
+
+    # Fill with remaining highest-weight edges until reaching m_target.
+    kept = set((min(u, v), max(u, v)) for u, v in T.edges())
+    for _, a, b in edges_all:
+        if len(T.edges()) >= m_target:
+            break
+        key = (a, b)
+        if key in kept:
+            continue
+        if not G.has_edge(a, b):
+            continue
+        T.add_edge(a, b, **G[a][b])
+        kept.add(key)
+
+    # Build final unweighted graph with weight_key = 1.0.
+    for u, data in T.nodes(data=True):
+        if u not in H:
+            H.add_node(u, **data)
+    for u, v, d in T.edges(data=True):
+        attrs = dict(d)
+        attrs[weight_key] = 1.0
+        H.add_edge(u, v, **attrs)
+
+    return H
+
+
+def squash_weights_for_bh(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    alpha: float = 0.5,
+    w_min: float = 0.0,
+    w_cap: float | None = None,
+    eps: float = 1e-12,
+) -> nx.Graph:
+    """
+    Monotone weight squash for Bethe-Hessian: w_s = w**alpha, clipped.
+    Returns a copy of G with squashed weights.
+    """
+    return rescale_graph_weights_for_downstream(
+        G,
+        method="bh",
+        weight_key=weight_key,
+        w_min=w_min,
+        w_cap=w_cap,
+        bh_mode="power",
+        bh_alpha=alpha,
+        eps=eps,
+    )
+
+
+def prune_to_unweighted_for_motif(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    target_mean_degree: float | None = None,
+    keep_frac: float | None = None,
+    ensure_connected: bool = True,
+) -> nx.Graph:
+    """
+    Prune a weighted graph to an unweighted 0/1 graph for motif:
+    - Choose a target mean degree per graph.
+    - Keep a maximum spanning forest for connectivity.
+    - Fill with highest-weight remaining edges up to the target edge count.
+    """
+    H = nx.Graph()
+    for u, data in G.nodes(data=True):
+        H.add_node(u, **data)
+
+    n = G.number_of_nodes()
+    m = G.number_of_edges()
+    if n <= 1 or m == 0:
+        return H
+
+    dbar = 2.0 * float(m) / float(n)
+    if target_mean_degree is None:
+        d_target = max(6.0, 0.60 * dbar)
+        else:
+        d_target = float(target_mean_degree)
+
+    m_keep = int(round(d_target * float(n) / 2.0))
+    m_keep = max(n - 1, min(m_keep, m))
+
+    # Base maximum spanning forest for connectivity.
+    T = nx.maximum_spanning_tree(G, weight=weight_key, algorithm="kruskal")
+
+    # Fill with remaining edges ordered by weight.
+    edges_all: List[Tuple[float, Any, Any]] = []
+    for u, v, d in G.edges(data=True):
+        w = float(d.get(weight_key, 1.0))
+        a = u if u <= v else v
+        b = v if u <= v else u
+        edges_all.append((w, a, b))
+    edges_all.sort(key=lambda t: (-t[0], t[1], t[2]))
+
+    kept = set((min(u, v), max(u, v)) for u, v in T.edges())
+    for _, a, b in edges_all:
+        if len(T.edges()) >= m_keep:
+            break
+        key = (a, b)
+        if key in kept:
+            continue
+        if not G.has_edge(a, b):
+            continue
+        T.add_edge(a, b)
+        kept.add(key)
+
+    # Build final unweighted graph; all edges have weight 1.0.
+    for u, data in T.nodes(data=True):
+        if u not in H:
+            H.add_node(u, **data)
+    for u, v in T.edges():
+        H.add_edge(u, v, weight=1.0)
+
+    if not ensure_connected:
+        return H
+
+    # Connectivity best-effort is already handled by the spanning forest.
+    return H
+
+
+def postprocess_for_downstream(G_denoised: nx.Graph, method: str, **kwargs) -> nx.Graph:
+    """
+    Downstream-specific postprocessing after DuoSpec:
+      - "bp"    : return weighted graph unchanged.
+      - "bh"    : apply monotone weight squash.
+      - "motif" : prune to 0/1 unweighted graph.
+    """
+    method_norm = method.lower()
+    if method_norm in {"bp", "belief_propagation"}:
+        return G_denoised
+    if method_norm in {"bh", "bethe_hessian"}:
+        return squash_weights_for_bh(G_denoised, **kwargs)
+    if method_norm == "motif":
+        return prune_to_unweighted_for_motif(G_denoised, **kwargs)
+    raise ValueError(f"Unknown downstream method '{method}' for postprocessing.")
+
 def duo_spec(
     H_obs: nx.Graph,
     K: int,
@@ -1783,18 +2144,18 @@ def duo_spec(
     update_scale: float = 0.8,
     metric_debug: bool = False,
     # Edge-denoising strengths (geometry shrink + optional community boost)
-    lam_geo: float = 0.22,
-    lam_comm_boost: float = 0.05,
+    lam_geo: float = 0.35,
+    lam_comm_boost: float = 0.01,
     # Geometry / community DSU controls
     S0: int = 20,
-    frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95),
+    frac_sweep: Tuple[float, ...] = (0.98, 0.95, 0.90, 0.85, 0.80),
     local_score: str = "cn_over_sqrtdeg",
     # Community gate & stability controls
-    geo_gate_enabled: bool = True,
-    gate_power: float = 1.5,
-    gate_floor: float = 0.02,
+    geo_gate_enabled: bool = False,
+    gate_power: float = 2.0,
+    gate_floor: float = 0.0,
     stable_k: int = 3,
-    delta_cap: float = 0.25,
+    delta_cap: float = 0.10,
     # Community-boost controls (second channel)
     use_comm_boost: bool = True,
 ):
@@ -1914,11 +2275,15 @@ def duo_spec(
             else:
                 coarse_id_per_node = np.zeros(len(node2idx), dtype=int)
 
-            p_same = np.zeros(len(edges), dtype=float)
-            for idx, (u, v) in enumerate(edges):
-                ui = node2idx[u]
-                vi = node2idx[v]
-                p_same[idx] = 1.0 if coarse_id_per_node[ui] == coarse_id_per_node[vi] else 0.0
+            p_same = compute_soft_psame_from_blob_graph(
+                edges=edges,
+                node2idx=node2idx,
+                blob_comp_per_node=blob_comp_per_node,
+                coarse_id_per_node=coarse_id_per_node,
+                blob_edges=blob_edges,
+                blob_weights=blob_weights,
+                temp=1.0,
+            )
         t_comm_end = time.perf_counter()
 
         t_rw_start = time.perf_counter()
@@ -1996,7 +2361,7 @@ def duo_spec(
                     f"{em} (max |Δobj| over last {conv_window} iters = "
                     f"{max_delta:.3e})"
                 )
-                break
+            break
 
     scores_local = edge_locality_scores(subG, edges, metric=local_score) if len(edges) > 0 else np.zeros(0, dtype=float)
     if len(edges) > 0:

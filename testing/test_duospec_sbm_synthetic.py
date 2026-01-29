@@ -55,7 +55,10 @@ def _accuracy_motif(
         G,
         q=K,
         random_state=random_state,
-        use_edge_weights=True
+        beta=0.2,
+        use_edge_weights=True,
+        weight_key="weight",
+        weight_pow=0.5,
     )
     true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
     stats = detection_stats(hard, true_labels)
@@ -82,6 +85,32 @@ def _accuracy_bp(
     true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
     stats = detection_stats(preds, true_labels)
     return float(stats["accuracy"])
+
+
+def _squash_weights_for_motif(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    lo_pct: float = 5.0,
+    hi_pct: float = 95.0,
+) -> nx.Graph:
+    H = G.copy()
+    if H.number_of_edges() == 0:
+        return H
+    w_vals = np.array(
+        [float(d.get(weight_key, 1.0)) for _, _, d in H.edges(data=True)],
+        dtype=float,
+    )
+    w_lo = float(np.percentile(w_vals, lo_pct))
+    w_hi = float(np.percentile(w_vals, hi_pct))
+    if not np.isfinite(w_lo) or not np.isfinite(w_hi) or w_hi <= w_lo:
+        return H
+    for u, v, d in H.edges(data=True):
+        w = float(d.get(weight_key, 1.0))
+        w_s = min(max(w, w_lo), w_hi)
+        w_sq = 0.5 + 1.5 * (w_s - w_lo) / (w_hi - w_lo + 1e-12)
+        d[weight_key] = float(w_sq)
+    return H
 
 
 def run_duospec_sbm_experiment(
@@ -146,9 +175,6 @@ def run_duospec_sbm_experiment(
             print(f"[WARN] BP pre-denoising failed: {e}")
             acc_bp_pre = np.nan
 
-        # Initial average degree used as pruning target for BH/Motif.
-        deg0 = compute_initial_avg_degree(G_true)
-
         try:
             # Use explicit weight bounds so we can reuse them in rescaling.
             res_duo = duo_spec(
@@ -203,18 +229,25 @@ def run_duospec_sbm_experiment(
             frac_shrunk = np.nan
 
         # 4) Post‑denoising accuracies:
-        #    - Bethe–Hessian and Motif on degree-preserving pruned + binarised graphs.
-        #    - BP on full denoised weighted graph.
+        #    - Bethe–Hessian on 0/1 pruned graph (bottom 25% edges removed, connectivity preserved).
+        #    - Motif on weighted denoised graph with log-domain edge weights.
+        #    - BP on full denoised weighted graph (unchanged).
+        # 4) Post‑denoising accuracies:
+        #    - Bethe–Hessian on 0/1 pruned graph with target mean degree = original.
+        #    - Motif on weighted denoised graph with log-domain edge weights (and optional squash).
+        #    - BP on full denoised weighted graph (unchanged).
+        # Original mean degree
+        mean_deg0 = compute_initial_avg_degree(G_true)
+
         try:
             G_bh = prune_degree_preserving_connected(
                 G_denoised,
-                target_avg_deg=deg0,
+                target_avg_deg=mean_deg0,
                 weight_key="weight",
-                k_min=4,
+                k_min=1,
                 k_max=30,
                 blend=1.0,
                 ensure_connected=True,
-                seed=seed,
             )
             acc_bh_post = _accuracy_bethe(G_bh, K=K, random_state=seed)
         except Exception as e:
@@ -222,17 +255,8 @@ def run_duospec_sbm_experiment(
             acc_bh_post = np.nan
 
         try:
-            G_motif = prune_degree_preserving_connected(
-                G_denoised,
-                target_avg_deg=deg0,
-                weight_key="weight",
-                k_min=4,
-                k_max=30,
-                blend=1.0,
-                ensure_connected=True,
-                seed=seed,
-            )
-            acc_motif_post = _accuracy_motif(G_motif, K=K, random_state=seed)
+            G_motif_in = _squash_weights_for_motif(G_denoised, weight_key="weight")
+            acc_motif_post = _accuracy_motif(G_motif_in, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] motif_spectral_embedding post-denoising failed: {e}")
             acc_motif_post = np.nan

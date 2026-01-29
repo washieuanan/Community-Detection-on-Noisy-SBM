@@ -149,21 +149,20 @@ def attention_laplacian(
 
     for u, v in G.edges():
         i, j = node2i[u], node2i[v]
-        base = np.exp(
-            np.clip(scale * dot[i, j], a_min=None, a_max=np.log(clip_max))
-        )
+        score = scale * dot[i, j]
 
         if use_edge_weights:
             d = G[u][v]
             w_e = float(d.get(weight_key, 1.0))
-            # Clamp and apply power – monotone transform in w_e.
-            w_e = max(weight_floor, w_e)
+            w_floor = max(weight_floor, 1e-12)
+            w_e = max(w_floor, w_e)
             if weight_cap is not None:
                 w_e = min(weight_cap, w_e)
-            w_e = w_e ** weight_pow
-            weight = base * w_e
-        else:
-            weight = base
+            score = score + weight_pow * np.log(w_e)
+
+        weight = np.exp(
+            np.clip(score, a_min=None, a_max=np.log(clip_max))
+        )
 
         iu.append(i)
         iv.append(j)
@@ -211,8 +210,7 @@ def motif_attention_laplacian(
     node2i  = {u:i for i,u in enumerate(nodes)}
     n       = len(nodes)
 
-    # 1) build base attention W
-    #    assume Z is dict node->np.array(d,)
+    # 1) build base attention W_base that ignores edge weights
     d_emb    = next(iter(Z.values())).shape[0]
     scale    = 1.0/np.sqrt(d_emb)
     iu, iv, data = [], [], []
@@ -221,34 +219,49 @@ def motif_attention_laplacian(
         zu, zv = Z[str(u)], Z[str(v)]
         score = np.dot(zu, zv) * scale
         base = np.exp(np.clip(score, a_min=None, a_max=np.log(clip_max)))
-
-        if use_edge_weights:
-            d = H_obs[u][v]
-            w_e = float(d.get(weight_key, 1.0))
-            w_e = max(weight_floor, w_e)
-            if weight_cap is not None:
-                w_e = min(weight_cap, w_e)
-            w_e = w_e ** weight_pow
-            w = base * w_e
-        else:
-            w = base
-
         iu.append(i)
         iv.append(j)
-        data.append(w)
-    W = sp.coo_matrix((data,(iu,iv)),shape=(n,n)).tocsr()
-    W = W + W.T  # symmetric
+        data.append(base)
+    W_base = sp.coo_matrix((data,(iu,iv)),shape=(n,n)).tocsr()
+    W_base = W_base + W_base.T  # symmetric
 
-    # 2) compute 2-hop weighted counts
-    W2 = W.dot(W)    # (n×n) sparse, entry (i,j)=sum_k W[i,k]*W[k,j]
+    # 2) compute 2-hop weighted counts on base attention
+    W2_base = W_base.dot(W_base)    # (n×n) sparse
 
-    # 3) motif weights on original edges: M_ij = W_ij * W2_ij
-    M = W.multiply(W2)  # keeps only those (i,j) where W_ij>0
+    # Optional edge-weight multiplier for motif term
+    edge_mult = None
+    if use_edge_weights and H_obs.number_of_edges() > 0:
+        w_arr = np.array(
+            [float(H_obs[u][v].get(weight_key, 1.0)) for u, v in H_obs.edges()],
+            dtype=float,
+        )
+        w_lo = float(np.percentile(w_arr, 5.0))
+        w_hi = float(np.percentile(w_arr, 95.0))
+        if np.isfinite(w_lo) and np.isfinite(w_hi) and w_hi > w_lo:
+            mults = []
+            for w in w_arr:
+                w_s = min(max(w, w_lo), w_hi)
+                mults.append(float(w_s ** weight_pow))
+            edge_mult = np.asarray(mults, dtype=float)
+        else:
+            edge_mult = np.ones(len(w_arr), dtype=float)
 
-    # 4) mix them
-    W_mix = (1.0 - beta) * W + beta * M
+    # 3) build mixed weights per original edge: W_mix_ij = (1-beta)*W_base_ij + beta*M_ij
+    iu_mix, iv_mix, data_mix = [], [], []
+    for idx, (u, v) in enumerate(H_obs.edges()):
+        i, j = node2i[u], node2i[v]
+        base_ij = float(W_base[i, j])
+        motif_ij = base_ij * float(W2_base[i, j])
+        if edge_mult is not None:
+            motif_ij *= float(edge_mult[idx])
+        w_ij = (1.0 - beta) * base_ij + beta * motif_ij
+        iu_mix.append(i)
+        iv_mix.append(j)
+        data_mix.append(w_ij)
+    W_mix = sp.coo_matrix((data_mix, (iu_mix, iv_mix)), shape=(n, n)).tocsr()
+    W_mix = W_mix + W_mix.T  # symmetric
 
-    # 5) build normalized Laplacian
+    # 4) build normalized Laplacian
     deg = np.array(W_mix.sum(axis=1)).ravel() + 1e-9
     D_inv_sqrt = sp.diags(1.0/np.sqrt(deg))
     H = D_inv_sqrt @ W_mix @ D_inv_sqrt
