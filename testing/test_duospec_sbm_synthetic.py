@@ -12,6 +12,7 @@ from algorithms.duo_spec import (
     detection_stats,
     get_true_communities,
     rescale_graph_weights_for_downstream,
+    denoise_then_prune_binary,
 )
 from algorithms.spectral_ops.attention import motif_spectral_embedding
 from algorithms.bp.vectorized_bp import belief_propagation_weighted
@@ -79,6 +80,10 @@ def _accuracy_bp(
     true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
     stats = detection_stats(preds, true_labels)
     return float(stats["accuracy"])
+
+
+BH_PRUNE_FRAC: float = 0.20
+MOTIF_PRUNE_FRAC: float = 0.20
 
 
 def run_duospec_sbm_experiment(
@@ -218,15 +223,17 @@ def run_duospec_sbm_experiment(
             frac_boosted = np.nan
             frac_shrunk = np.nan
 
-        # 4) Post‑denoising accuracies on raw denoised graph
+        # 4) Post‑denoising accuracies: BH/Motif on pruned binary graphs, BP on full denoised graph.
         try:
-            acc_bh_post = _accuracy_bethe(G_denoised, K=K, random_state=seed)
+            G_bh = denoise_then_prune_binary(G_denoised, prune_frac=BH_PRUNE_FRAC, seed=seed)
+            acc_bh_post = _accuracy_bethe(G_bh, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] Bethe-Hessian post-denoising failed: {e}")
             acc_bh_post = np.nan
 
         try:
-            acc_motif_post = _accuracy_motif(G_denoised, K=K, random_state=seed)
+            G_motif = denoise_then_prune_binary(G_denoised, prune_frac=MOTIF_PRUNE_FRAC, seed=seed)
+            acc_motif_post = _accuracy_motif(G_motif, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] motif_spectral_embedding post-denoising failed: {e}")
             acc_motif_post = np.nan
@@ -238,7 +245,7 @@ def run_duospec_sbm_experiment(
             acc_bp_post = np.nan
         # 5) Evaluation-only rescaling sweeps for BH and BP (monotone, weights-only)
 
-        # --- BP rescaling sweep ----------------------------------------------
+        # --- BP rescaling sweep (BH/Motif use pruned binary graphs; no rescaling) ---
         bp_configs = [
             {"bp_mode": "sigmoid", "bp_beta": 3.0},
             {"bp_mode": "sigmoid", "bp_beta": 5.0},
@@ -270,47 +277,9 @@ def run_duospec_sbm_experiment(
             bp_rescale_wins[bp_best_name] = 0
         bp_rescale_wins[bp_best_name] += 1
 
-        bh_configs = [
-            {"bh_mode": "power", "bh_alpha": 0.5},
-            {"bh_mode": "power", "bh_alpha": 0.7},
-            {"bh_mode": "rank_sigmoid", "bh_beta": 3.0},
-        ]
+        # For BH and Motif we do not rescale weights; postR equals post.
         acc_bh_post_rescaled = acc_bh_post
-        bh_best_name = "none"
-        for cfg in bh_configs:
-            try:
-                G_bh = rescale_graph_weights_for_downstream(
-                    G_denoised,
-                    method="bh",
-                    w_min=w_min,
-                    w_cap=w_cap,
-                    **cfg,
-                )
-                acc = _accuracy_bethe(G_bh, K=K, random_state=seed)
-            except Exception as e:
-                print(f"[WARN] BH rescaling config {cfg} failed: {e}")
-                acc = np.nan
-            if np.isnan(acc):
-                continue
-            if np.isnan(acc_bh_post_rescaled) or acc > acc_bh_post_rescaled:
-                acc_bh_post_rescaled = acc
-                bh_best_name = f"bh_mode={cfg.get('bh_mode')},alpha={cfg.get('bh_alpha', 'NA')},beta={cfg.get('bh_beta', 'NA')}"
-
-        if bh_best_name not in bh_rescale_wins:
-            bh_rescale_wins[bh_best_name] = 0
-        bh_rescale_wins[bh_best_name] += 1
-
-        try:
-            G_denoised_motif = rescale_graph_weights_for_downstream(
-                G_denoised,
-                method="motif",
-                w_min=w_min,
-                w_cap=w_cap,
-            )
-            acc_motif_post_rescaled = _accuracy_motif(G_denoised_motif, K=K, random_state=seed)
-        except Exception as e:
-            print(f"[WARN] motif_spectral_embedding post-denoising (rescaled) failed: {e}")
-            acc_motif_post_rescaled = np.nan
+        acc_motif_post_rescaled = acc_motif_post
 
         # Per-seed compact summary
         d_bh = acc_bh_post - acc_bh_pre

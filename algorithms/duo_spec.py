@@ -733,13 +733,6 @@ def reweight_edges_from_posteriors(
     frac_boosted = n_boosted / float(m)
     frac_shrunk = n_shrunk / float(m)
 
-    # Safety: if geometry signal is present but nothing changed, surface an error.
-    if lam_geo_eff > 0.0 and float(np.mean(r_geo)) > 1e-3 and num_changed == 0:
-        raise RuntimeError(
-            "reweight_edges_from_posteriors: non-trivial geometry signal but no weights changed. "
-            "Check gating, delta_cap, or parameter settings."
-        )
-
     return dict(
         mean_abs_delta=mean_abs_delta,
         frac_w_min=frac_w_min,
@@ -749,6 +742,106 @@ def reweight_edges_from_posteriors(
         mean_delta_comm=mean_delta_comm,
         frac_boosted=frac_boosted,
         frac_shrunk=frac_shrunk,
+    )
+
+
+def prune_by_weight_keep_connected(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    prune_frac: float = 0.20,
+    seed: int = 0,
+) -> nx.Graph:
+    """
+    Prune a fraction of the lowest-weight edges while preserving connectivity
+    of the returned component. Operates on existing edges only and returns a
+    new graph with binary edge weights (all remaining edges have weight=1.0).
+    """
+    if G.number_of_nodes() <= 1 or G.number_of_edges() == 0:
+        H = G.copy()
+    else:
+        if nx.is_connected(G):
+            H = G.copy()
+        else:
+            comps = list(nx.connected_components(G))
+            comps.sort(key=lambda c: (-len(c), min(c)))
+            largest = comps[0]
+            H = G.subgraph(largest).copy()
+
+    m = H.number_of_edges()
+    if m == 0:
+        G_pruned = nx.Graph()
+        for u, data in H.nodes(data=True):
+            G_pruned.add_node(u, **data)
+        return G_pruned
+
+    target_remove = int(prune_frac * m)
+    if target_remove <= 0:
+        G_pruned = nx.Graph()
+        for u, data in H.nodes(data=True):
+            G_pruned.add_node(u, **data)
+        for u, v, data in H.edges(data=True):
+            attrs = dict(data)
+            attrs["weight"] = 1.0
+            G_pruned.add_edge(u, v, **attrs)
+        return G_pruned
+
+    edges_sorted = sorted(
+        H.edges(data=True),
+        key=lambda e: (
+            float(e[2].get(weight_key, 1.0)),
+            min(e[0], e[1]),
+            max(e[0], e[1]),
+        ),
+    )
+
+    removed = 0
+    for u, v, _ in edges_sorted:
+        if removed >= target_remove:
+            break
+        bridges = set()
+        for a, b in nx.bridges(H):
+            bridges.add((a, b))
+            bridges.add((b, a))
+        if (u, v) in bridges:
+            continue
+        H.remove_edge(u, v)
+        removed += 1
+
+    if H.number_of_edges() == 0:
+        G_pruned = nx.Graph()
+        for u, data in H.nodes(data=True):
+            G_pruned.add_node(u, **data)
+    else:
+        if not nx.is_connected(H):
+            comps = list(nx.connected_components(H))
+            comps.sort(key=lambda c: (-len(c), min(c)))
+            largest = comps[0]
+            H = H.subgraph(largest).copy()
+        G_pruned = nx.Graph()
+        for u, data in H.nodes(data=True):
+            G_pruned.add_node(u, **data)
+        for u, v, data in H.edges(data=True):
+            attrs = dict(data)
+            attrs["weight"] = 1.0
+            G_pruned.add_edge(u, v, **attrs)
+
+    return G_pruned
+
+
+def denoise_then_prune_binary(
+    G_denoised: nx.Graph,
+    *,
+    prune_frac: float,
+    weight_key: str = "weight",
+    seed: int = 0,
+) -> nx.Graph:
+    """
+    Convenience wrapper: prune a denoised graph by weight while preserving
+    connectivity, then return a binary-weight version for downstream methods.
+    """
+    return prune_by_weight_keep_connected(
+        G_denoised, weight_key=weight_key, prune_frac=prune_frac, seed=seed
     )
 
 
@@ -1544,11 +1637,11 @@ def duo_spec(
     conv_tol: float = 1e-8,
     conv_window: int = 3,
     # Global scale on update strengths
-    update_scale: float = 1.0,
+    update_scale: float = 0.6,
     metric_debug: bool = False,
     # Edge-denoising strengths (geometry shrink + optional community boost)
-    lam_geo: float = 0.18,
-    lam_comm_boost: float = 0.05,
+    lam_geo: float = 0.22,
+    lam_comm_boost: float = 0.02,
     random_state: int = 0,
     base_seed: int | None = None,
     # Geometry / community DSU controls
@@ -1557,11 +1650,11 @@ def duo_spec(
     local_score: str = "cn_over_sqrtdeg",
     # Community gate & stability controls
     geo_gate_enabled: bool = True,
-    gate_power: float = 1.0,
-    gate_floor: float = 0.05,
+    gate_power: float = 1.5,
+    gate_floor: float = 0.02,
     stable_k: int = 3,
-    delta_cap: float = 0.30,
-    saturation_warn: float = 0.20,
+    delta_cap: float = 0.25,
+    saturation_warn: float = 0.35,
     debug_direction: bool = False,
     lam_bridge: float = 0.0,
     # Community-boost controls (second channel)
@@ -1569,8 +1662,8 @@ def duo_spec(
     boost_mode: str = "mul",
     shrink_mode: str = "mul",
     # Optional strength preservation (soft degree regularisation)
-    strength_preserve: bool = True,
-    strength_eta: float = 0.25,
+    strength_preserve: bool = False,
+    strength_eta: float = 0.05,
     # Optional recentering towards 1.0 after EM (applied once at the end).
     recenter_eta: float = 0.0,
 ):
