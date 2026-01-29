@@ -1612,7 +1612,159 @@ __all__ = [
     "detection_stats",
     "get_true_communities",
     "rescale_graph_weights_for_downstream",
+    "compute_initial_avg_degree",
+    "prune_degree_preserving_connected",
 ]
+
+
+def compute_initial_avg_degree(G: nx.Graph) -> float:
+    """Return the average degree 2m/n of the given graph."""
+    n = G.number_of_nodes()
+    if n == 0:
+        return 0.0
+    m = G.number_of_edges()
+    return 2.0 * float(m) / float(n)
+
+
+def prune_degree_preserving_connected(
+    G_weighted: nx.Graph,
+    target_avg_deg: float,
+    *,
+    weight_key: str = "weight",
+    k_min: int = 1,
+    k_max: int = 30,
+    blend: float = 1.0,
+    ensure_connected: bool = True,
+) -> nx.Graph:
+    """
+    Degree-preserving pruning with connectivity-preserving binarisation.
+
+    - Compute a global k_target from target_avg_deg, clamped to [k_min, k_max].
+    - For each node, keep its top-k_target incident edges by weight.
+    - Union edges chosen by either endpoint.
+    - Binarise remaining edges (set weight=1.0).
+    - Optionally, ensure each original connected component remains connected
+      by adding back high-weight edges from G_weighted within that component.
+    """
+    # Copy nodes (and their attributes) first.
+    H = nx.Graph()
+    for u, data in G_weighted.nodes(data=True):
+        H.add_node(u, **data)
+
+    n = G_weighted.number_of_nodes()
+    if n == 0:
+        return H
+
+    # Determine global k_target.
+    k_target = int(round(float(blend) * float(target_avg_deg)))
+    if k_min is not None:
+        k_target = max(k_target, int(k_min))
+    if k_max is not None:
+        k_target = min(k_target, int(k_max))
+    if k_target <= 0:
+        # Degenerate case: keep no edges.
+        return H
+
+    # Collect candidate edges to keep: union over per-node top-k.
+    kept_edges = set()
+    for u in G_weighted.nodes():
+        inc = []
+        for v, d in G_weighted[u].items():
+            w = float(d.get(weight_key, 1.0))
+            a = u if u <= v else v
+            b = v if u <= v else u
+            inc.append((w, a, b))
+        if not inc:
+            continue
+        # Sort descending by weight, tie-break by (a,b).
+        inc.sort(key=lambda t: (-t[0], t[1], t[2]))
+        for _, a, b in inc[:k_target]:
+            kept_edges.add((a, b))
+
+    # Add kept edges with binary weight.
+    for a, b in kept_edges:
+        if G_weighted.has_edge(a, b):
+            data = dict(G_weighted[a][b])
+            data[weight_key] = 1.0
+            H.add_edge(a, b, **data)
+
+    if not ensure_connected or G_weighted.number_of_edges() == 0:
+        return H
+
+    # For each original connected component, ensure H is at least as connected
+    # as G_weighted, by adding back high-weight edges within that component.
+    for comp_nodes in nx.connected_components(G_weighted):
+        comp_nodes = list(comp_nodes)
+        if len(comp_nodes) <= 1:
+            continue
+
+        # Restrict to this component.
+        H_sub = H.subgraph(comp_nodes).copy()
+        G_sub = G_weighted.subgraph(comp_nodes)
+
+        # Union-find over nodes in this component based on H_sub edges.
+        nodes_list = list(comp_nodes)
+        idx_of = {u: i for i, u in enumerate(nodes_list)}
+        parent = np.arange(len(nodes_list), dtype=int)
+        size = np.ones(len(nodes_list), dtype=int)
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i: int, j: int) -> bool:
+            ri, rj = find(i), find(j)
+            if ri == rj:
+                return False
+            if size[ri] < size[rj]:
+                ri, rj = rj, ri
+            parent[rj] = ri
+            size[ri] += size[rj]
+            return True
+
+        # Initialise DSU with existing edges in H_sub.
+        for u, v in H_sub.edges():
+            iu = idx_of[u]
+            iv = idx_of[v]
+            union(iu, iv)
+
+        # Helper to count current number of components in this DSU.
+        def num_sets() -> int:
+            roots = {find(i) for i in range(len(nodes_list))}
+            return len(roots)
+
+        if num_sets() <= 1:
+            # Already connected within this component.
+            continue
+
+        # Candidate edges from G_sub, sorted by descending weight, deterministic ties.
+        cand_edges = []
+        for u, v, d in G_sub.edges(data=True):
+            w = float(d.get(weight_key, 1.0))
+            a = u if u <= v else v
+            b = v if u <= v else u
+            cand_edges.append((w, a, b))
+        if not cand_edges:
+            continue
+
+        cand_edges.sort(key=lambda t: (-t[0], t[1], t[2]))
+
+        for _, a, b in cand_edges:
+            iu = idx_of[a]
+            iv = idx_of[b]
+            if find(iu) == find(iv):
+                continue
+            # Add edge back with binary weight.
+            data = dict(G_weighted[a][b])
+            data[weight_key] = 1.0
+            H.add_edge(a, b, **data)
+            union(iu, iv)
+            if num_sets() <= 1:
+                break
+
+    return H
 
 def duo_spec(
     H_obs: nx.Graph,
@@ -1628,11 +1780,11 @@ def duo_spec(
     conv_tol: float = 1e-8,
     conv_window: int = 3,
     # Global scale on update strengths
-    update_scale: float = 0.6,
+    update_scale: float = 0.8,
     metric_debug: bool = False,
     # Edge-denoising strengths (geometry shrink + optional community boost)
     lam_geo: float = 0.22,
-    lam_comm_boost: float = 0.02,
+    lam_comm_boost: float = 0.05,
     # Geometry / community DSU controls
     S0: int = 20,
     frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95),

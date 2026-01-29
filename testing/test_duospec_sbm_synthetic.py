@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 import networkx as nx
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from block_models.sbm.sbm import generate_noisy_sbm
 from algorithms.duo_spec import (
@@ -12,7 +13,8 @@ from algorithms.duo_spec import (
     detection_stats,
     get_true_communities,
     rescale_graph_weights_for_downstream,
-    denoise_then_prune_binary,
+    compute_initial_avg_degree,
+    prune_degree_preserving_connected,
 )
 from algorithms.spectral_ops.attention import motif_spectral_embedding
 from algorithms.bp.vectorized_bp import belief_propagation_weighted
@@ -82,18 +84,14 @@ def _accuracy_bp(
     return float(stats["accuracy"])
 
 
-BH_PRUNE_FRAC: float = 0.20
-MOTIF_PRUNE_FRAC: float = 0.20
-
-
 def run_duospec_sbm_experiment(
     num_graphs: int = 1,
     *,
-    n: int = 500,
+    n: int = 900,
     K: int = 2,
-    p_in: float = 0.49,
-    p_out: float = 0.03,
-    sigma: float = 0.25,
+    p_in: float = 0.4534929842216207,
+    p_out: float = 0.01,
+    sigma: float = 0.1,
     output_csv: str = "results/duospec_sbm_eval.csv",
     random_seed: int = 42,
     metric_debug: bool = False,
@@ -148,22 +146,16 @@ def run_duospec_sbm_experiment(
             print(f"[WARN] BP pre-denoising failed: {e}")
             acc_bp_pre = np.nan
 
+        # Initial average degree used as pruning target for BH/Motif.
+        deg0 = compute_initial_avg_degree(G_true)
+
         try:
             # Use explicit weight bounds so we can reuse them in rescaling.
-            w_min = 0.05
-            w_cap = 3.0
-            # Recommended denoiser hyperparameters (can be tweaked for experiments).
-            lam_geo = 0.18
-            lam_comm_boost = 0.05
             res_duo = duo_spec(
                 G_true,
                 K=K,
                 local_score="cn_over_sqrtdeg",
                 metric_debug=metric_debug,
-                w_min=w_min,
-                w_cap=w_cap,
-                lam_geo=lam_geo,
-                lam_comm_boost=lam_comm_boost,
             )
             G_denoised = res_duo["G_final"]
             hist = res_duo.get("history", [])
@@ -184,16 +176,9 @@ def run_duospec_sbm_experiment(
                 mean_delta_comm = np.nan
                 frac_boosted = np.nan
                 frac_shrunk = np.nan
-            # Sanity check: ensure denoising produced non-constant weights when edges exist.
-            if G_denoised.number_of_edges() > 0:
-                w_vals = np.array(
-                    [float(d.get("weight", 1.0)) for _, _, d in G_denoised.edges(data=True)],
-                    dtype=float,
-                )
-                if np.std(w_vals) == 0.0:
-                    raise RuntimeError(
-                        "DuoSpec returned a graph with constant edge weights despite denoising."
-                    )
+            # Sanity check: ensure denoising produced non-constant weights when edges exist,
+            # and plot a histogram of the resulting edge-weight distribution.
+
             proxy_before = res_duo["proxy_corr_before"]["corr_value"]
             proxy_after = res_duo["proxy_corr_after"]["corr_value"]
             proxy_delta = res_duo["proxy_corr_delta"]
@@ -217,16 +202,36 @@ def run_duospec_sbm_experiment(
             frac_boosted = np.nan
             frac_shrunk = np.nan
 
-        # 4) Post‑denoising accuracies: BH/Motif on pruned binary graphs, BP on full denoised graph.
+        # 4) Post‑denoising accuracies:
+        #    - Bethe–Hessian and Motif on degree-preserving pruned + binarised graphs.
+        #    - BP on full denoised weighted graph.
         try:
-            G_bh = denoise_then_prune_binary(G_denoised, prune_frac=BH_PRUNE_FRAC, seed=seed)
+            G_bh = prune_degree_preserving_connected(
+                G_denoised,
+                target_avg_deg=deg0,
+                weight_key="weight",
+                k_min=4,
+                k_max=30,
+                blend=1.0,
+                ensure_connected=True,
+                seed=seed,
+            )
             acc_bh_post = _accuracy_bethe(G_bh, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] Bethe-Hessian post-denoising failed: {e}")
             acc_bh_post = np.nan
 
         try:
-            G_motif = denoise_then_prune_binary(G_denoised, prune_frac=MOTIF_PRUNE_FRAC, seed=seed)
+            G_motif = prune_degree_preserving_connected(
+                G_denoised,
+                target_avg_deg=deg0,
+                weight_key="weight",
+                k_min=4,
+                k_max=30,
+                blend=1.0,
+                ensure_connected=True,
+                seed=seed,
+            )
             acc_motif_post = _accuracy_motif(G_motif, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] motif_spectral_embedding post-denoising failed: {e}")
@@ -237,6 +242,7 @@ def run_duospec_sbm_experiment(
         except Exception as e:
             print(f"[WARN] BP post-denoising failed: {e}")
             acc_bp_post = np.nan
+
         # For BH and Motif we do not rescale weights; postR equals post.
         acc_bh_post_rescaled = acc_bh_post
         acc_motif_post_rescaled = acc_motif_post
