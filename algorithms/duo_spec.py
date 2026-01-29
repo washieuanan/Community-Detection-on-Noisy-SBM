@@ -599,7 +599,6 @@ def reweight_edges_from_posteriors(
     *,
     lam_geo: float,
     lam_comm_boost: float,
-    lam_bridge: float,
     w_min: float,
     w_cap: float,
     delta_cap: float,
@@ -609,8 +608,6 @@ def reweight_edges_from_posteriors(
     gate_power: float = 2.0,
     gate_floor: float = 0.05,
     use_comm_boost: bool = True,
-    boost_mode: str = "mul",
-    shrink_mode: str = "mul",
 ) -> Dict[str, float]:
     """
     Smooth, monotone reweighting based on geometry and community signals.
@@ -623,7 +620,7 @@ def reweight_edges_from_posteriors(
         comm_eff = (1 - r) * ps
         b_eff = bridge_score (if provided) else 0
 
-        delta = (-lam_geo * r_eff) + (lam_comm * comm_eff) + (lam_bridge * b_eff)
+        delta = (-lam_geo * r_eff) + (lam_comm * comm_eff)
         delta = clip(delta, -delta_cap, +delta_cap)
         w_new = w * (1 + delta), then clamped into [w_min, w_cap].
     """
@@ -653,7 +650,6 @@ def reweight_edges_from_posteriors(
 
     lam_geo_eff = float(lam_geo) if lam_geo is not None else 0.0
     lam_comm_boost_eff = float(lam_comm_boost) if lam_comm_boost is not None else 0.0
-    lam_bridge_eff = float(lam_bridge) if lam_bridge is not None else 0.0
     delta_cap_eff = float(delta_cap)
     assert delta_cap_eff >= 0.0, "delta_cap must be non-negative."
 
@@ -694,11 +690,8 @@ def reweight_edges_from_posteriors(
         else:
             delta_comm = 0.0
 
-        # Optional bridge component (kept for backward compatibility; typically 0).
-        delta_bridge = lam_bridge_eff * b_eff
-
-        # Combined signed delta before clipping.
-        delta = delta_geo + delta_comm + delta_bridge
+        # Combined signed delta before clipping (geometry + community channels).
+        delta = delta_geo + delta_comm
         delta = float(np.clip(delta, -delta_cap_eff, delta_cap_eff))
 
         # Apply update multiplicatively; boost/shrink modes are kept for future
@@ -1628,8 +1621,6 @@ def duo_spec(
     # EM controls
     max_em_iters: int = 20,
     min_em_iters: int = 2,
-    anneal_steps: int = 0,
-    warmup_rounds: int = 0,
     # Weight bounds (slightly wider by default for downstream BH/Motif/BP)
     w_min: float = 0.05,
     w_cap: float = 3.0,
@@ -1642,8 +1633,6 @@ def duo_spec(
     # Edge-denoising strengths (geometry shrink + optional community boost)
     lam_geo: float = 0.22,
     lam_comm_boost: float = 0.02,
-    random_state: int = 0,
-    base_seed: int | None = None,
     # Geometry / community DSU controls
     S0: int = 20,
     frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95),
@@ -1654,18 +1643,8 @@ def duo_spec(
     gate_floor: float = 0.02,
     stable_k: int = 3,
     delta_cap: float = 0.25,
-    saturation_warn: float = 0.35,
-    debug_direction: bool = False,
-    lam_bridge: float = 0.0,
     # Community-boost controls (second channel)
     use_comm_boost: bool = True,
-    boost_mode: str = "mul",
-    shrink_mode: str = "mul",
-    # Optional strength preservation (soft degree regularisation)
-    strength_preserve: bool = False,
-    strength_eta: float = 0.05,
-    # Optional recentering towards 1.0 after EM (applied once at the end).
-    recenter_eta: float = 0.0,
 ):
     """Purely structural EM denoiser (no spectral methods; DSU-based geometry & community proxies)."""
     print(
@@ -1673,9 +1652,6 @@ def duo_spec(
         f"(max={max_em_iters}, min={min_em_iters}, tol={conv_tol:.1e}, window={conv_window})"
     )
 
-    rng = np.random.default_rng(random_state)
-    if base_seed is not None:
-        rng_base = np.random.RandomState(base_seed)
     subG = deepcopy(H_obs)
     for _, _, d in subG.edges(data=True):
         d.setdefault("weight", 1.0)
@@ -1692,16 +1668,6 @@ def duo_spec(
 
     best, hist, no_imp = {"obj": -np.inf}, [], 0
     m0 = subG.number_of_edges()
-
-    def _lam(step, base, warmup_rounds=warmup_rounds, anneal_steps=anneal_steps):
-        if step < warmup_rounds:           # ❶ pure warm-up
-            return 0.0
-        d = step - warmup_rounds
-        if d < anneal_steps:               # ❷ linear ramp
-            return base * d / anneal_steps
-        # ❸ harmonic decay after plateau
-        t = d - anneal_steps
-        return base / (1 + t)
 
     geom_corr_before = proxy_weight_locality_correlation(
         subG,
@@ -1723,8 +1689,6 @@ def duo_spec(
 
     for em in range(1, max_em_iters + 1):
         print(f"[EM] iter {em} / {max_em_iters}")
-        if base_seed is not None:
-            random_state = rng_base.randint(0, 2**32 - 1)
 
         edges = np.asarray(list(subG.edges()), dtype=object)
 
@@ -1814,7 +1778,6 @@ def duo_spec(
             p_same,
             lam_geo=lam_geo_curr * update_scale,
             lam_comm_boost=lam_comm_boost * update_scale,
-            lam_bridge=lam_bridge * update_scale,
             w_min=w_min,
             w_cap=w_cap,
             delta_cap=delta_cap,
@@ -1823,8 +1786,6 @@ def duo_spec(
             gate_power=gate_power,
             gate_floor=gate_floor,
             use_comm_boost=use_comm_boost,
-            boost_mode=boost_mode,
-            shrink_mode=shrink_mode,
         )
         t_rw_end = time.perf_counter()
 
@@ -1846,55 +1807,6 @@ def duo_spec(
                 f"reweight={t_rw_end - t_rw_start:.3f}s"
             )
 
-        if strength_preserve and subG.number_of_edges() > 0:
-            preserve_node_strengths(
-                subG,
-                base_strength=base_strength,
-                node2idx=node2idx,
-                weight_key="weight",
-                eta=strength_eta,
-                eps=1e-12,
-                w_min=w_min,
-                w_cap=w_cap,
-            )
-        if len(edges) > 0 and debug_direction:
-            # weights after reweight
-            weights_now = np.asarray(
-                [float(d.get("weight", 1.0)) for _, _, d in subG.edges(data=True)],
-                dtype=float,
-            )
-            # locality scores from this iteration
-            L_vals = scores_local
-            m_edges = len(L_vals)
-            k = max(1, m_edges // 10)
-            idx_sorted = np.argsort(L_vals)
-            low_idx = idx_sorted[:k]
-            high_idx = idx_sorted[-k:]
-            mean_w_low = float(weights_now[low_idx].mean())
-            mean_w_high = float(weights_now[high_idx].mean())
-            ratio = mean_w_high / mean_w_low if mean_w_low > 0 else float("inf")
-
-            sp_loc, _ = spearmanr(weights_now, L_vals)
-
-            print(
-                "[EM][Dir] weights vs locality: "
-                f"mean_w_lowL={mean_w_low:.4f}, "
-                f"mean_w_highL={mean_w_high:.4f}, "
-                f"high/low={ratio:.3f}, "
-                f"spearman(w,L)={sp_loc:.4f}"
-            )
-
-            # If many edges are saturating, automatically temper lam_geo_curr
-            sat_frac = max(geo_stats["frac_w_min"], geo_stats["frac_w_cap"])
-            if sat_frac > saturation_warn:
-                old = lam_geo_curr
-                lam_geo_curr *= 0.5
-                print(
-                    "[EM][Warn] weight saturation high "
-                    f"(frac_min={geo_stats['frac_w_min']:.3f}, "
-                    f"frac_cap={geo_stats['frac_w_cap']:.3f}); "
-                    f"reducing lam_geo from {old:.4f} to {lam_geo_curr:.4f}"
-                )
 
         obj = -float(geo_stats["mean_abs_delta"])
         hist.append(
@@ -1979,19 +1891,6 @@ def duo_spec(
         coarse_id_per_node_final = np.zeros(len(node2idx), dtype=int)
         blob_comp_final = np.zeros(len(node2idx), dtype=int)
 
-    # Optional single-shot recentering towards 1.0 after EM to avoid drift,
-    # without fighting per-iteration learning dynamics.
-    if recenter_eta > 0.0 and len(edges) > 0:
-        eta = float(recenter_eta)
-        for u, v, d in subG.edges(data=True):
-            w = float(d.get("weight", 1.0))
-            w_rc = 1.0 + (w - 1.0) * (1.0 - eta)
-            w_rc = float(min(w_cap, max(w_min, w_rc)))
-            d["weight"] = w_rc
-
-    # --- proxy weight–locality correlation AFTER denoising -------------------
-
-    # --- proxy weight–locality correlation AFTER denoising -------------------
     geom_corr_after = proxy_weight_locality_correlation(
         subG,
         weight_key="weight",

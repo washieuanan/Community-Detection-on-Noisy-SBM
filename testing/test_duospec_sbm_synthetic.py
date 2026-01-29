@@ -87,7 +87,7 @@ MOTIF_PRUNE_FRAC: float = 0.20
 
 
 def run_duospec_sbm_experiment(
-    num_graphs: int = 5,
+    num_graphs: int = 1,
     *,
     n: int = 500,
     K: int = 2,
@@ -110,9 +110,6 @@ def run_duospec_sbm_experiment(
 
     rng = np.random.default_rng(random_seed)
     records: List[Dict[str, Any]] = []
-    # Track which rescaling configs tend to win (evaluation-only diagnostics).
-    bp_rescale_wins: Dict[str, int] = {}
-    bh_rescale_wins: Dict[str, int] = {}
 
     for g_idx in range(num_graphs):
         seed = int(rng.integers(0, 2**32 - 1))
@@ -167,9 +164,6 @@ def run_duospec_sbm_experiment(
                 w_cap=w_cap,
                 lam_geo=lam_geo,
                 lam_comm_boost=lam_comm_boost,
-                strength_preserve=True,
-                strength_eta=0.25,
-                recenter_eta=0.0,
             )
             G_denoised = res_duo["G_final"]
             hist = res_duo.get("history", [])
@@ -243,43 +237,11 @@ def run_duospec_sbm_experiment(
         except Exception as e:
             print(f"[WARN] BP post-denoising failed: {e}")
             acc_bp_post = np.nan
-        # 5) Evaluation-only rescaling sweeps for BH and BP (monotone, weights-only)
-
-        # --- BP rescaling sweep (BH/Motif use pruned binary graphs; no rescaling) ---
-        bp_configs = [
-            {"bp_mode": "sigmoid", "bp_beta": 3.0},
-            {"bp_mode": "sigmoid", "bp_beta": 5.0},
-            {"bp_mode": "sigmoid", "bp_beta": 7.0},
-            {"bp_mode": "quantile", "bp_beta": 5.0, "bp_a": 2.0, "bp_b": 2.0},
-        ]
-        acc_bp_post_rescaled = acc_bp_post
-        bp_best_name = "none"
-        for cfg in bp_configs:
-            try:
-                G_bp = rescale_graph_weights_for_downstream(
-                    G_denoised,
-                    method="bp",
-                    w_min=w_min,
-                    w_cap=w_cap,
-                    **cfg,
-                )
-                acc = _accuracy_bp(G_bp, K=K, random_state=seed)
-            except Exception as e:
-                print(f"[WARN] BP rescaling config {cfg} failed: {e}")
-                acc = np.nan
-            if np.isnan(acc):
-                continue
-            if np.isnan(acc_bp_post_rescaled) or acc > acc_bp_post_rescaled:
-                acc_bp_post_rescaled = acc
-                bp_best_name = f"bp_mode={cfg.get('bp_mode')},beta={cfg.get('bp_beta')},a={cfg.get('bp_a', 'NA')},b={cfg.get('bp_b', 'NA')}"
-
-        if bp_best_name not in bp_rescale_wins:
-            bp_rescale_wins[bp_best_name] = 0
-        bp_rescale_wins[bp_best_name] += 1
-
         # For BH and Motif we do not rescale weights; postR equals post.
         acc_bh_post_rescaled = acc_bh_post
         acc_motif_post_rescaled = acc_motif_post
+        # BP also uses raw denoised weights without additional rescaling.
+        acc_bp_post_rescaled = acc_bp_post
 
         # Per-seed compact summary
         d_bh = acc_bh_post - acc_bh_pre
@@ -355,14 +317,6 @@ def run_duospec_sbm_experiment(
             f"post={post_mean:.4f} Δpost={delta_mean:+.4f} "
             f"postR={postR_mean:.4f} ΔpostR={deltaR_mean:+.4f}"
         )
-
-    print("\nBP rescaling wins (per-seed best config counts):")
-    for name, cnt in sorted(bp_rescale_wins.items(), key=lambda x: -x[1]):
-        print(f"  {name:40s}: {cnt}")
-
-    print("\nBH rescaling wins (per-seed best config counts):")
-    for name, cnt in sorted(bh_rescale_wins.items(), key=lambda x: -x[1]):
-        print(f"  {name:40s}: {cnt}")
 
     print("\n=== Denoiser statistics (final EM iteration, averaged over all runs) ===")
     for key in [
