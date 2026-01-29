@@ -1011,7 +1011,7 @@ def proxy_weight_locality_correlation(
                 f"computed_with_jitter_due_to_near_constant_inputs(std_w={std_w:.3e},"
                 f" std_L={std_s:.3e})"
             )
-    else:
+        else:
             reason = (
                 f"near_constant_inputs(std_w={std_w:.3e}, std_L={std_s:.3e})"
             )
@@ -2067,7 +2067,7 @@ def prune_to_unweighted_for_motif(
     dbar = 2.0 * float(m) / float(n)
     if target_mean_degree is None:
         d_target = max(6.0, 0.60 * dbar)
-        else:
+    else:
         d_target = float(target_mean_degree)
 
     m_keep = int(round(d_target * float(n) / 2.0))

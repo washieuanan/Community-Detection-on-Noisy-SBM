@@ -1,24 +1,17 @@
-from algorithms.bp.old.vectorized_geometric_bp import (
-    belief_propagation,
-    detection_stats,
-    get_true_communities,
-)
 
 import numpy as np
 import networkx as nx
 
-from algorithms.bp.old.duo_bp import (
-    duo_bp,
-    create_dist_observed_subgraph,
+from algorithms.duo_spec import (
+    duo_spec,
+    detection_stats,
+    get_true_communities,
 )
-
-from algorithms.duo_spec import duo_spec, duo_bprop
 import os
 import json
 import logging
 import random
-from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
-from algorithms.spectral_ops.attention import motif_spectral_embedding
+from algorithms.bp.vectorized_bp import belief_propagation_weighted
 
 def coords_str2arr(G: nx.Graph, dim = 16):
     """
@@ -47,49 +40,143 @@ if __name__ == "__main__":
     G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
     G = coords_str2arr(G)
 
-
-
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
     print(f"Created Graph with {len(G.nodes())} nodes and {len(G.edges())} edges")
-    
-    duo_params = dict(
-        # spectral-EM settings
-        K               = 2,                    # number of communities
-        num_balls       = 32,                   # finer geometry embedding
-        config          = ("bethe_hessian",     # community estimator
-                        "bethe_hessian"),        # geometry estimator
 
-        # — EM schedule
-        max_em_iters    = 100,                  # allow more EM steps
-        warmup_rounds   = 2,                   # hold off on any re-weighting
-        anneal_steps    = 20,                   # then ramp λ from 0→full over 30 iter
+    K = 2
 
-        # — convergence
-        tol             = 1e-5,
-        patience        = 10,
-        random_state    = 42,
+    # BP on original graph (pre-denoising)
+    beliefs_pre, preds_pre, node2idx_pre, _ = belief_propagation_weighted(
+        G,
+        q=K,
+        max_iter=200,
+        tol=1e-4,
+        damping=0.5,
+        seed=0,
+        init="random",
     )
-    
-    res = duo_spec(G, **duo_params)
+    true_communities = get_true_communities(G, node2idx=node2idx_pre, attr="comm")
+    stats_pre = detection_stats(preds_pre, true_communities)
 
-    preds = res['communities']
-    # G_fin = res['G_final']
+    # DuoSpec denoising (structural)
+    res = duo_spec(
+        G,
+        K=K,
+        max_em_iters=75,
+        min_em_iters=10,
+        w_min=0.05,
+        w_cap=3.0,
+        conv_tol=1e-10,
+        conv_window=10,
+        update_scale=0.8,
+        lam_geo=0.30,
+        lam_comm_boost=0.02,
+        S0=20,
+        frac_sweep=(0.995, 0.99, 0.98, 0.97, 0.95),
+        local_score="cn_over_sqrtdeg",
+        geo_gate_enabled=True,
+        gate_power=1.0,
+        gate_floor=0.10,
+        stable_k=2,
+        delta_cap=0.10,
+        use_comm_boost=True,
+        random_state=0,
+    )
 
-    # _, preds, _, _ = belief_propagation_weighted(
-    #     G_fin, 
-    #     q=2, 
-    #     max_iter = 1000,
-    # )
+    G_den = res["G_final"]
 
-    
-    preds = res["communities"]
+    # BP on denoised graph (post-denoising)
+    beliefs_post, preds_post, node2idx_post, _ = belief_propagation_weighted(
+        G_den,
+        q=K,
+        max_iter=200,
+        tol=1e-4,
+        damping=0.5,
+        seed=0,
+        init="random",
+    )
+    true_communities_post = get_true_communities(G_den, node2idx=node2idx_post, attr="comm")
+    stats_post = detection_stats(preds_post, true_communities_post)
 
-    print(f"Finished bethe_duo_bp with {len(preds)} predictions")
-    true_communities = get_true_communities(G, attr="comm")
-    stats = detection_stats(preds, true_communities)
-    print(stats)
-    # logging.info(f"Finished detection stats")
-    print(f"Finished detection stats") 
+    # Extract correlation metrics from DuoSpec (fallback if missing)
+    proxy_before = res.get("proxy_corr_before")
+    proxy_after = res.get("proxy_corr_after")
+    proxy_delta = res.get("proxy_corr_delta")
+    if proxy_before is None or proxy_after is None or proxy_delta is None:
+        from algorithms.duo_spec import proxy_weight_locality_correlation
+
+        proxy_before = proxy_weight_locality_correlation(
+            G, weight_key="weight", local_score="cn_over_sqrtdeg", corr="spearman"
+        )
+        proxy_after = proxy_weight_locality_correlation(
+            G_den, weight_key="weight", local_score="cn_over_sqrtdeg", corr="spearman"
+        )
+        before_val = proxy_before.get("spearman", float("nan"))
+        after_val = proxy_after.get("spearman", float("nan"))
+        proxy_delta = after_val - before_val
+
+    coord_before = res.get("coord_corr_before")
+    coord_after = res.get("coord_corr_after")
+    coord_delta = res.get("coord_corr_delta")
+    if coord_before is None or coord_after is None or coord_delta is None:
+        from algorithms.duo_spec import weight_coord_distance_correlation
+
+        coord_before = weight_coord_distance_correlation(
+            G, coord_key="coords", weight_key="weight", corr="spearman"
+        )
+        coord_after = weight_coord_distance_correlation(
+            G_den, coord_key="coords", weight_key="weight", corr="spearman"
+        )
+        cb = coord_before.get("spearman", float("nan"))
+        ca = coord_after.get("spearman", float("nan"))
+        coord_delta = ca - cb
+
+    # Build result row
+    acc_pre = float(stats_pre.get("accuracy", float("nan")))
+    acc_post = float(stats_post.get("accuracy", float("nan")))
+    acc_delta = acc_post - acc_pre
+
+    row = {
+        "dataset": G.graph.get("subclasses", ""),
+        "n": G.number_of_nodes(),
+        "m": G.number_of_edges(),
+        "K": K,
+        "acc_pre": acc_pre,
+        "acc_post": acc_post,
+        "acc_delta": acc_delta,
+        "proxy_spearman_before": float(proxy_before.get("spearman", float("nan"))),
+        "proxy_spearman_after": float(proxy_after.get("spearman", float("nan"))),
+        "proxy_spearman_delta": float(proxy_delta),
+        "coord_spearman_before": float(coord_before.get("spearman", float("nan"))),
+        "coord_spearman_after": float(coord_after.get("spearman", float("nan"))),
+        "coord_spearman_delta": float(coord_delta),
+        "max_em_iters": 75,
+        "min_em_iters": 10,
+        "w_min": 0.05,
+        "w_cap": 3.0,
+        "update_scale": 0.8,
+        "lam_geo": 0.30,
+        "lam_comm_boost": 0.02,
+        "delta_cap": 0.10,
+        "gate_power": 1.0,
+        "gate_floor": 0.10,
+    }
+
+    os.makedirs("results/amazon_orig", exist_ok=True)
+    out_path = os.path.join("results/amazon_orig", "amazon_orig_duospec_bp.csv")
+    try:
+        import pandas as pd
+
+        pd.DataFrame([row]).to_csv(out_path, index=False)
+    except ImportError:
+        import csv
+
+        write_header = not os.path.exists(out_path)
+        with open(out_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
     
         
             
