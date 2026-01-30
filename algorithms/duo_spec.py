@@ -2569,7 +2569,7 @@ def duo_spec(
     K: int,
     *,
     # EM controls
-    max_em_iters: int = 30,
+    max_em_iters: int = 20,
     min_em_iters: int = 2,
     # Weight bounds (slightly wider by default for downstream BH/Motif/BP)
     w_min: float = 0.05,
@@ -2605,11 +2605,10 @@ def duo_spec(
     # Community-boost controls (second channel)
     use_comm_boost: bool = True,
     # Community proxy selection
-    community_proxy: str = "dsu",
+    community_proxy: str = "leiden",
     louvain_resolution: float = 1.0,
     leiden_resolution: float = 1.0,
     # Fine-blob target controls
-    fine_mode: str = "target_blobs",
     # Chosen so that target_blobs ≈ 80 at n=900 and ≈ 1500 at n=46000.
     blob_scale_alpha: float = 0.745,
     blob_scale_c: float = 0.50,
