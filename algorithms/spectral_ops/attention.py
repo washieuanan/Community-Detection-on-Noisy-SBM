@@ -187,7 +187,7 @@ def motif_attention_laplacian(
     # Evaluation-time option: scale attention by existing edge weights.
     use_edge_weights: bool = False,
     weight_key: str = "weight",
-    weight_pow: float = 1.0,
+    weight_pow: float = 0.5,
     weight_floor: float = 0.0,
     weight_cap: float | None = None,
 ) -> sp.csr_matrix:
@@ -283,7 +283,7 @@ def motif_spectral_embedding(
     # Allow DuoSpec/GeoDe weights to influence motif attention.
     use_edge_weights: bool = False,
     weight_key: str = "weight",
-    weight_pow: float = 1.0,
+    weight_pow: float = 0.5,
 ) -> tuple[np.ndarray,np.ndarray,dict,dict]:
     """
     1) Build node embeddings Z via PPMI+SVD (pure NumPy).

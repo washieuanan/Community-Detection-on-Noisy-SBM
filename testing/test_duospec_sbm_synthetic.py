@@ -14,7 +14,7 @@ from algorithms.duo_spec import (
     get_true_communities,
     rescale_graph_weights_for_downstream,
     compute_initial_avg_degree,
-    prune_degree_preserving_connected,
+    prune_for_bh_weight_aware,
 )
 from algorithms.spectral_ops.attention import motif_spectral_embedding
 from algorithms.bp.vectorized_bp import belief_propagation_weighted
@@ -118,9 +118,9 @@ def run_duospec_sbm_experiment(
     *,
     n: int = 900,
     K: int = 2,
-    p_in: float = 0.4534929842216207,
-    p_out: float = 0.01,
-    sigma: float = 0.1,
+    p_in: float = 0.49,
+    p_out: float = 0.02,
+    sigma: float = 0.10,
     output_csv: str = "results/duospec_sbm_eval.csv",
     random_seed: int = 42,
     metric_debug: bool = False,
@@ -182,6 +182,7 @@ def run_duospec_sbm_experiment(
                 K=K,
                 local_score="cn_over_sqrtdeg",
                 metric_debug=metric_debug,
+                community_proxy="leiden"
             )
             G_denoised = res_duo["G_final"]
             hist = res_duo.get("history", [])
@@ -240,14 +241,10 @@ def run_duospec_sbm_experiment(
         mean_deg0 = compute_initial_avg_degree(G_true)
 
         try:
-            G_bh = prune_degree_preserving_connected(
+            G_bh = prune_for_bh_weight_aware(
                 G_denoised,
-                target_avg_deg=mean_deg0,
                 weight_key="weight",
-                k_min=1,
-                k_max=30,
-                blend=1.0,
-                ensure_connected=True,
+                mean_degree_target=mean_deg0,
             )
             acc_bh_post = _accuracy_bethe(G_bh, K=K, random_state=seed)
         except Exception as e:
@@ -255,8 +252,7 @@ def run_duospec_sbm_experiment(
             acc_bh_post = np.nan
 
         try:
-            G_motif_in = _squash_weights_for_motif(G_denoised, weight_key="weight")
-            acc_motif_post = _accuracy_motif(G_motif_in, K=K, random_state=seed)
+            acc_motif_post = _accuracy_motif(G_denoised, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] motif_spectral_embedding post-denoising failed: {e}")
             acc_motif_post = np.nan

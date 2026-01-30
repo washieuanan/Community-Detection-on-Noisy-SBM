@@ -17,19 +17,33 @@ from algorithms.spectral_ops.attention import motif_spectral_embedding
 if __name__ == "__main__":
     # Load polblogs dataset - it has 2 communities
     G = load_airports()
-    
-    
     true_labels = get_true_communities(G, node2idx=None, attr="comm")
-    _, preds, _, _ = motif_spectral_embedding(G, q=4)
-    # # Print DuoSpec results
+    _, preds, _, _ = belief_propagation_weighted(
+        G,
+        q=4,
+        seed=0,
+        init="spectral",
+    )
     stats = detection_stats(preds, true_labels)
-    print("\n=== Community‑detection accuracy MASO ===")
+    print("\n=== BP Accuracy ===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")
     
+    res_duo = duo_spec(
+        G,
+        K=4,
+        max_em_iters=50,
+        community_proxy="leiden"
+    )
     
-    _, preds, _, _ = belief_propagation(G, q=4)
+    G_res = res_duo['G_final']
+    _, preds, _, _ = belief_propagation_weighted(
+                                            G_res, 
+                                            q=4, 
+                                            seed=0, 
+                                            init="spectral"
+                                                )
     stats = detection_stats(preds, true_labels)
-    print("\n=== Community‑detection accuracy BP ===")
+    print("\n=== Post-Duospec BP ===")
     for k, v in stats.items():
         print(f"{k:>25s} : {v}")

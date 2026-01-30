@@ -196,10 +196,19 @@ def geometry_scores_fineblob_persistence(
     node2idx: Dict[Any, int],
     *,
     frac_sweep: Tuple[float, ...] = (0.995, 0.99, 0.98, 0.97, 0.95, 0.90, 0.85),
-    fine_frac: float = 0.99,
-    S0: int = 30,
-    stable_k: int = 3,
+    fine_frac: float = 0.95,
+    S0: int = 50,
+    stable_k: int = 2,
     debug: bool = False,
+    fine_mode: str = "target_blobs",
+    target_n_blobs_low: int | None = None,
+    target_n_blobs_high: int | None = None,
+    min_target_blobs: int = 20,
+    max_target_blobs: int = 20000,
+    fine_min_frac: float = 0.05,
+    fine_max_frac: float = 0.995,
+    fine_search_iters: int = 16,
+    merge_singletons: bool = True,
 ) -> Dict[str, np.ndarray]:
     """
     Fine-blob persistence geometry discriminator (structure-only).
@@ -233,8 +242,107 @@ def geometry_scores_fineblob_persistence(
     idx_of = node2idx
 
     # --- fine partition via high-locality subgraph --------------------------
-    thr_fine = np.percentile(scores_local, fine_frac * 100.0)
-    high_mask_fine = scores_local >= thr_fine
+    def _topk_mask(scores: np.ndarray, k: int) -> np.ndarray:
+        # Select exactly k highest scores; deterministic tie-break by edge index.
+        m_arr = int(scores.shape[0])
+        if k <= 0:
+            return np.zeros(m_arr, dtype=bool)
+        if k >= m_arr:
+            return np.ones(m_arr, dtype=bool)
+        # Deterministic tiny jitter so ties are resolved by index, not randomness.
+        s = scores.astype(float) + (1e-12 * np.arange(m_arr, dtype=float))
+        idx = np.argpartition(s, m_arr - k)[m_arr - k:]  # indices of top-k
+        mask = np.zeros(m_arr, dtype=bool)
+        mask[idx] = True
+        return mask
+
+    std_scores = float(np.std(scores_local)) if m > 0 else 0.0
+
+    def _count_components_for_k(k_edges: int) -> int:
+        parent = np.arange(n, dtype=int)
+        size = np.ones(n, dtype=int)
+
+        def find_f2(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union_f2(i: int, j: int):
+            ri, rj = find_f2(i), find_f2(j)
+            if ri == rj:
+                return
+            if size[ri] < size[rj]:
+                ri, rj = rj, ri
+            parent[rj] = ri
+            size[ri] += size[rj]
+
+        mask_k = _topk_mask(scores_local, k_edges)
+        for idx, (u, v) in enumerate(edges):
+            if not mask_k[idx]:
+                continue
+            ui = idx_of[u]
+            vi = idx_of[v]
+            union_f2(ui, vi)
+
+        roots = {find_f2(i) for i in range(n)}
+        return len(roots)
+
+    if fine_mode == "fixed_frac" or std_scores < 1e-12:
+        # Existing semantics: fine_frac close to 1.0 means keep a small top fraction.
+        # We interpret: keep top (1 - fine_frac) fraction of edges.
+        k_fine = int(np.ceil((1.0 - float(fine_frac)) * m))
+        high_mask_fine = _topk_mask(scores_local, k_fine)
+    else:
+        # Target band for number of fine blobs.
+        n_min = max(min_target_blobs, 1)
+        n_max = max(n_min, max_target_blobs)
+        if target_n_blobs_low is None or target_n_blobs_high is None:
+            low_target = n_min
+            high_target = n_max
+        else:
+            low_target = max(n_min, int(target_n_blobs_low))
+            high_target = min(n_max, int(target_n_blobs_high))
+            if high_target < low_target:
+                mid = int(round(0.5 * (low_target + high_target)))
+                low_target = high_target = max(n_min, min(n_max, mid))
+
+        # Binary search over k (number of edges to keep).
+        # Convert fraction bounds to k bounds.
+        k_min = max(1, int(np.ceil((1.0 - float(fine_max_frac)) * m)))
+        k_max = min(m, int(np.ceil((1.0 - float(fine_min_frac)) * m)))
+        best_k = k_min
+        best_score = None
+
+        for _ in range(max(1, fine_search_iters)):
+            k_test = int(round(0.5 * (k_min + k_max)))
+            k_test = max(1, min(m, k_test))
+            c = _count_components_for_k(k_test)
+
+            # Distance to target band.
+            if c < low_target:
+                dist = float(low_target - c)
+            elif c > high_target:
+                dist = float(c - high_target)
+            else:
+                dist = 0.0
+
+            if best_score is None or dist < best_score:
+                best_score = dist
+                best_k = k_test
+
+            # Adjust search: we want more edges (larger k) if too many blobs.
+            if c > high_target:
+                # Too many blobs → include more edges → increase k.
+                k_min = k_test
+            elif c < low_target:
+                # Too few blobs → include fewer edges → decrease k.
+                k_max = k_test
+            else:
+                best_k = k_test
+                break
+
+        high_mask_fine = _topk_mask(scores_local, best_k)
 
     parent_fine = np.arange(n, dtype=int)
     size_fine = np.ones(n, dtype=int)
@@ -283,7 +391,6 @@ def geometry_scores_fineblob_persistence(
     # --- multi-threshold persistence over locality --------------------------
     levels = sorted(frac_sweep, reverse=True)
     L = len(levels)
-    thresholds = np.percentile(scores_local, [f * 100.0 for f in levels])
 
     count_small = np.zeros(m, dtype=int)
 
@@ -320,8 +427,9 @@ def geometry_scores_fineblob_persistence(
 
         return parent, comp_size
 
-    for _, thr in enumerate(thresholds):
-        high_mask = scores_local >= thr
+    for f in levels:
+        k = int(np.ceil((1.0 - float(f)) * m))
+        high_mask = _topk_mask(scores_local, k)
         if not high_mask.any():
             continue
 
@@ -662,6 +770,174 @@ def community_proxy_persistence_on_blob_graph(
     return coarse_ids
 
 
+def _partition_to_labels(groups: List[set[int]], num_nodes: int) -> np.ndarray:
+    labels = np.zeros(num_nodes, dtype=int)
+    for gid, g in enumerate(groups):
+        for u in g:
+            labels[int(u)] = int(gid)
+    return labels
+
+
+def _enforce_exact_k(
+    groups: List[set[int]],
+    K: int,
+    B: nx.Graph,
+    *,
+    weight_key: str = "weight",
+) -> List[set[int]]:
+    if K <= 0:
+        raise ValueError(f"K must be positive, got {K}.")
+    # Start from non-empty groups only.
+    groups = [set(g) for g in groups if len(g) > 0]
+    if not groups:
+        return [set()] * K
+
+    # Merge until we have at most K groups.
+    while len(groups) > K:
+        sizes = [(len(g), idx) for idx, g in enumerate(groups)]
+        sizes.sort()  # ascending by (size, idx)
+        _, i = sizes[0]
+        _, j = sizes[1]
+        gi = groups[i]
+        gj = groups[j]
+        merged = gi.union(gj)
+        new_groups = []
+        for idx, g in enumerate(groups):
+            if idx in (i, j):
+                continue
+            new_groups.append(g)
+        new_groups.append(merged)
+        groups = new_groups
+
+    # Split until we have at least K groups.
+    while len(groups) < K:
+        # Choose largest group to split (deterministic).
+        sizes = [(-len(g), idx) for idx, g in enumerate(groups)]
+        sizes.sort()
+        _, idx_largest = sizes[0]
+        g = sorted(groups[idx_largest])
+        if len(g) <= 1:
+            break
+
+        # Induced subgraph on this group.
+        sub_nodes = g
+        idx_map = {u: i for i, u in enumerate(sub_nodes)}
+        edges_u = []
+        edges_v = []
+        weights = []
+        for u, v, d in B.subgraph(sub_nodes).edges(data=True):
+            edges_u.append(idx_map[u])
+            edges_v.append(idx_map[v])
+            weights.append(float(d.get(weight_key, 1.0)))
+
+        if edges_u and edges_v:
+            labels_sub = dsu_exact_k_partition(
+                num_nodes=len(sub_nodes),
+                edges_u=np.asarray(edges_u, dtype=int),
+                edges_v=np.asarray(edges_v, dtype=int),
+                weights=np.asarray(weights, dtype=float),
+                K=2,
+                seed=0,
+                tie_break="lex",
+            )
+            g0 = {sub_nodes[i] for i, lab in enumerate(labels_sub) if lab == 0}
+            g1 = {sub_nodes[i] for i, lab in enumerate(labels_sub) if lab == 1}
+            if not g0 or not g1:
+                mid = len(sub_nodes) // 2
+                g0 = set(sub_nodes[:mid])
+                g1 = set(sub_nodes[mid:])
+        else:
+            mid = len(sub_nodes) // 2
+            g0 = set(sub_nodes[:mid])
+            g1 = set(sub_nodes[mid:])
+
+        new_groups = []
+        for idx, g_old in enumerate(groups):
+            if idx == idx_largest:
+                continue
+            new_groups.append(g_old)
+        new_groups.append(g0)
+        new_groups.append(g1)
+        groups = new_groups
+
+    # If still not enough groups, pad with empty sets (should be rare).
+    while len(groups) < K:
+        groups.append(set())
+    return groups
+
+
+def _louvain_partition_exact_k(
+    B: nx.Graph,
+    K: int,
+    *,
+    resolution: float = 1.0,
+    seed: int = 0,
+) -> np.ndarray:
+    if K > B.number_of_nodes():
+        raise ValueError(f"K={K} cannot exceed num_blobs={B.number_of_nodes()}.")
+    from networkx.algorithms.community import louvain_communities
+
+    base_part = louvain_communities(
+        B,
+        weight="weight",
+        seed=seed,
+        resolution=resolution,
+    )
+    groups = [set(map(int, g)) for g in base_part]
+    groups = _enforce_exact_k(groups, K, B, weight_key="weight")
+    labels = _partition_to_labels(groups, B.number_of_nodes())
+    return labels
+
+
+def _leiden_partition_exact_k(
+    B: nx.Graph,
+    K: int,
+    *,
+    resolution: float = 1.0,
+    seed: int = 0,
+) -> np.ndarray:
+    if K > B.number_of_nodes():
+        raise ValueError(f"K={K} cannot exceed num_blobs={B.number_of_nodes()}.")
+    try:
+        import igraph as ig
+        import leidenalg
+    except ImportError as e:
+        raise ImportError(
+            "Leiden community_proxy requires python-igraph and leidenalg to be installed."
+        ) from e
+
+    n = B.number_of_nodes()
+    g = ig.Graph()
+    g.add_vertices(n)
+    weights = []
+    edges = []
+    for u, v, d in B.edges(data=True):
+        edges.append((int(u), int(v)))
+        weights.append(float(d.get("weight", 1.0)))
+    if edges:
+        g.add_edges(edges)
+        g.es["weight"] = weights
+    else:
+        # No edges: fall back to single community or trivial labeling.
+        return np.zeros(n, dtype=int)
+
+    part = leidenalg.find_partition(
+        g,
+        leidenalg.RBConfigurationVertexPartition,
+        weights=g.es["weight"],
+        resolution_parameter=resolution,
+        seed=seed,
+    )
+    membership = list(part.membership)
+    groups_dict: Dict[int, set[int]] = {}
+    for node, lab in enumerate(membership):
+        groups_dict.setdefault(int(lab), set()).add(int(node))
+    groups = list(groups_dict.values())
+    groups = _enforce_exact_k(groups, K, B, weight_key="weight")
+    labels = _partition_to_labels(groups, n)
+    return labels
+
+
 def reweight_edges_from_posteriors(
     G: nx.Graph,
     edges: np.ndarray,
@@ -679,6 +955,11 @@ def reweight_edges_from_posteriors(
     gate_power: float = 2.0,
     gate_floor: float = 0.05,
     use_comm_boost: bool = True,
+    comm_boost_psame_thr: float = 0.92,
+    comm_boost_rgeo_max: float = 0.35,
+    scores_local: np.ndarray | None = None,
+    geo_fallback_alpha: float = 0.0,
+    geo_fallback_mode: str = "locality",
 ) -> Dict[str, float]:
     """
     Smooth, monotone reweighting based on geometry and community signals.
@@ -733,7 +1014,28 @@ def reweight_edges_from_posteriors(
     n_boosted = 0
     n_shrunk = 0
 
-    for (u, v), r, ps, br in zip(edges, r_geo, p_same, bridge_score):
+    # Precompute fallback geometry suspicion if requested.
+    fallback_arr: np.ndarray | None = None
+    if scores_local is not None and geo_fallback_alpha > 0.0 and m > 0:
+        assert len(scores_local) == m, "scores_local length mismatch."
+        if m <= 1:
+            bad_local = np.zeros(m, dtype=float)
+        else:
+            ranks = rankdata(scores_local, method="average")  # 1..m
+            denom = max(float(m - 1), 1.0)
+            loc_rank = (ranks - 1.0) / denom
+            bad_local = 1.0 - loc_rank
+        bad_local = np.clip(bad_local, 0.0, 1.0)
+
+        if geo_fallback_mode == "bridge":
+            fb = np.clip(bridge_score, 0.0, 1.0)
+        elif geo_fallback_mode == "both":
+            fb = 0.5 * (bad_local + np.clip(bridge_score, 0.0, 1.0))
+        else:  # "locality" or unknown
+            fb = bad_local
+        fallback_arr = np.clip(fb, 0.0, 1.0)
+
+    for idx, ((u, v), r, ps, br) in enumerate(zip(edges, r_geo, p_same, bridge_score)):
         w = float(G[u][v].get(weight_key, 1.0))
 
         # Clip signals
@@ -748,7 +1050,14 @@ def reweight_edges_from_posteriors(
         else:
             gate = 1.0
 
-        r_eff = r_clipped * gate
+        # Fallback geometry suspicion (structure-only).
+        if fallback_arr is not None:
+            fb = float(fallback_arr[idx])
+            r_base = float(np.clip(r_clipped + geo_fallback_alpha * fb, 0.0, 1.0))
+        else:
+            r_base = r_clipped
+
+        r_eff = r_base * gate
         comm_eff = (1.0 - r_clipped) * ps_clipped
         b_eff = float(br) if br is not None else 0.0
 
@@ -759,8 +1068,8 @@ def reweight_edges_from_posteriors(
         if (
             use_comm_boost
             and lam_comm_boost_eff > 0.0
-            and ps_clipped >= 0.8
-            and (1.0 - r_clipped) >= 0.8
+            and ps_clipped >= comm_boost_psame_thr
+            and r_clipped <= comm_boost_rgeo_max
         ):
             delta_comm = lam_comm_boost_eff * comm_eff
         else:
@@ -2016,6 +2325,77 @@ def mst_fill_prune_to_target_mean_degree(
     return H
 
 
+def prune_for_bh_weight_aware(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    mean_degree_target: float | None = None,
+) -> nx.Graph:
+    """
+    Weight-aware Bethe–Hessian pruning:
+      - preserve connectivity via a maximum spanning tree,
+      - then fill with highest-weight remaining edges until the target
+        edge count implied by `mean_degree_target` is reached.
+
+    Edge weights on kept edges are preserved.
+    """
+    H = nx.Graph()
+    for u, data in G.nodes(data=True):
+        H.add_node(u, **data)
+
+    if G.number_of_nodes() <= 1 or G.number_of_edges() == 0:
+        return H
+
+    # Work on the largest connected component for stability.
+    if not nx.is_connected(G):
+        comps = list(nx.connected_components(G))
+        comps.sort(key=lambda c: (-len(c), min(c)))
+        G = G.subgraph(comps[0]).copy()
+
+    n = G.number_of_nodes()
+    m0 = G.number_of_edges()
+    if n <= 1 or m0 == 0:
+        return H
+
+    if mean_degree_target is None:
+        # Fall back to keeping all edges.
+        return G.copy()
+
+    m_target = int(round(float(mean_degree_target) * float(n) / 2.0))
+    m_target = max(n - 1, min(m_target, m0))
+
+    # Base maximum spanning tree by weight to ensure connectivity.
+    T = nx.maximum_spanning_tree(G, weight=weight_key, algorithm="kruskal")
+
+    # Start with tree edges.
+    for u, v, d in T.edges(data=True):
+        attrs = dict(d)
+        H.add_edge(u, v, **attrs)
+
+    # Add remaining edges by descending weight until reaching m_target.
+    edges_all: List[Tuple[float, Any, Any, dict]] = []
+    for u, v, d in G.edges(data=True):
+        w = float(d.get(weight_key, 1.0))
+        a = u if u <= v else v
+        b = v if u <= v else u
+        edges_all.append((w, a, b, dict(d)))
+    edges_all.sort(key=lambda t: (-t[0], t[1], t[2]))
+
+    kept = set((min(u, v), max(u, v)) for u, v in H.edges())
+    for w, a, b, attrs in edges_all:
+        if H.number_of_edges() >= m_target:
+            break
+        key = (a, b)
+        if key in kept:
+            continue
+        if not G.has_edge(a, b):
+            continue
+        H.add_edge(a, b, **attrs)
+        kept.add(key)
+
+    return H
+
+
 def squash_weights_for_bh(
     G: nx.Graph,
     *,
@@ -2050,10 +2430,9 @@ def prune_to_unweighted_for_motif(
     ensure_connected: bool = True,
 ) -> nx.Graph:
     """
-    Prune a weighted graph to an unweighted 0/1 graph for motif:
-    - Choose a target mean degree per graph.
-    - Keep a maximum spanning forest for connectivity.
-    - Fill with highest-weight remaining edges up to the target edge count.
+    (Deprecated for motif) Previously pruned a weighted graph to an
+    unweighted 0/1 graph for motif. Kept for backward compatibility but
+    no longer used in new motif evaluation paths.
     """
     H = nx.Graph()
     for u, data in G.nodes(data=True):
@@ -2107,6 +2486,64 @@ def prune_to_unweighted_for_motif(
     if not ensure_connected:
         return H
 
+
+def bp_postprocess_log_squash(
+    G: nx.Graph,
+    *,
+    weight_key: str = "weight",
+    eps: float = 1e-12,
+    clip: float = 2.0,
+    gamma: float = 1.5,
+    recenter: str = "mean",
+    w_min: float | None = None,
+    w_cap: float | None = None,
+) -> nx.Graph:
+    """
+    BP-only postprocessing: log-space normalize + clip + gentle power on edge weights.
+
+    Returns a new graph with the same nodes/edges and remapped weights.
+    """
+    H = G.copy()
+    m = H.number_of_edges()
+    if m == 0:
+        return H
+
+    # Collect log-weights.
+    s_list: list[float] = []
+    edge_keys: list[tuple[Any, Any]] = []
+    for u, v, d in H.edges(data=True):
+        w = float(d.get(weight_key, 1.0))
+        w_safe = max(w, float(eps))
+        s_list.append(float(np.log(w_safe)))
+        edge_keys.append((u, v))
+
+    s_arr = np.asarray(s_list, dtype=float)
+    if recenter == "median":
+        c = float(np.median(s_arr))
+    else:
+        c = float(np.mean(s_arr))
+
+    # Recenter and clip in log-space.
+    s_arr = s_arr - c
+    s_arr = np.clip(s_arr, -float(clip), float(clip))
+
+    # Map back, apply gentle power, and optional clamping.
+    w_new = np.exp(s_arr)
+    if gamma != 1.0:
+        w_new = np.power(w_new, float(gamma))
+
+    if w_min is not None:
+        w_new = np.maximum(w_new, float(w_min))
+    if w_cap is not None:
+        w_new = np.minimum(w_new, float(w_cap))
+
+    # Write back remapped weights.
+    for (u, v), w_val in zip(edge_keys, w_new):
+        if H.has_edge(u, v):
+            H[u][v][weight_key] = float(w_val)
+
+    return H
+
     # Connectivity best-effort is already handled by the spanning forest.
     return H
 
@@ -2124,7 +2561,7 @@ def postprocess_for_downstream(G_denoised: nx.Graph, method: str, **kwargs) -> n
     if method_norm in {"bh", "bethe_hessian"}:
         return squash_weights_for_bh(G_denoised, **kwargs)
     if method_norm == "motif":
-        return prune_to_unweighted_for_motif(G_denoised, **kwargs)
+        return G_denoised
     raise ValueError(f"Unknown downstream method '{method}' for postprocessing.")
 
 def duo_spec(
@@ -2132,7 +2569,7 @@ def duo_spec(
     K: int,
     *,
     # EM controls
-    max_em_iters: int = 20,
+    max_em_iters: int = 30,
     min_em_iters: int = 2,
     # Weight bounds (slightly wider by default for downstream BH/Motif/BP)
     w_min: float = 0.05,
@@ -2144,20 +2581,45 @@ def duo_spec(
     update_scale: float = 0.8,
     metric_debug: bool = False,
     # Edge-denoising strengths (geometry shrink + optional community boost)
-    lam_geo: float = 0.35,
-    lam_comm_boost: float = 0.01,
+    lam_geo: float = 0.15,
+    lam_comm_boost: float = 0.015,
     # Geometry / community DSU controls
-    S0: int = 20,
+    S0: int = 50,
     frac_sweep: Tuple[float, ...] = (0.98, 0.95, 0.90, 0.85, 0.80),
     local_score: str = "cn_over_sqrtdeg",
     # Community gate & stability controls
-    geo_gate_enabled: bool = False,
-    gate_power: float = 2.0,
-    gate_floor: float = 0.0,
+    geo_gate_enabled: bool = True,
+    gate_power: float = 1.0,
+    gate_floor: float = 0.1,
     stable_k: int = 3,
     delta_cap: float = 0.10,
+    # Community-boost selectivity
+    comm_boost_psame_thr: float = 0.96,
+    comm_boost_rgeo_max: float = 0.30,
+    # Geometry fallback controls
+    geo_fallback_alpha: float = 0.35,
+    geo_fallback_mode: str = "locality",
+    # Strength preservation
+    strength_preserve: bool = True,
+    strength_eta: float = 0.20,
     # Community-boost controls (second channel)
     use_comm_boost: bool = True,
+    # Community proxy selection
+    community_proxy: str = "dsu",
+    louvain_resolution: float = 1.0,
+    leiden_resolution: float = 1.0,
+    # Fine-blob target controls
+    fine_mode: str = "target_blobs",
+    # Chosen so that target_blobs ≈ 80 at n=900 and ≈ 1500 at n=46000.
+    blob_scale_alpha: float = 0.745,
+    blob_scale_c: float = 0.50,
+    blob_target_rel_tol: float = 0.15,
+    min_target_blobs: int = 20,
+    max_target_blobs: int = 20000,
+    fine_min_frac: float = 0.05,
+    fine_max_frac: float = 0.995,
+    fine_search_iters: int = 16,
+    merge_singletons: bool = True,
 ):
     """Purely structural EM denoiser (no spectral methods; DSU-based geometry & community proxies)."""
     print(
@@ -2171,7 +2633,22 @@ def duo_spec(
 
     node2idx = {u: i for i, u in enumerate(subG.nodes())}
 
-    base_strength = np.zeros(len(node2idx), dtype=float)
+    n_nodes = len(node2idx)
+    # Scale fine-blob target band with n.
+    target_blobs = int(round(float(blob_scale_c) * (float(n_nodes) ** float(blob_scale_alpha))))
+    target_blobs = max(min_target_blobs, min(max_target_blobs, target_blobs))
+    band_low = max(
+        min_target_blobs,
+        int(np.floor((1.0 - float(blob_target_rel_tol)) * float(target_blobs))),
+    )
+    band_high = min(
+        max_target_blobs,
+        int(np.ceil((1.0 + float(blob_target_rel_tol)) * float(target_blobs))),
+    )
+    if band_high < band_low:
+        band_low = band_high = target_blobs
+
+    base_strength = np.zeros(n_nodes, dtype=float)
     for u, v, d in subG.edges(data=True):
         w0 = float(d.get("weight", 1.0))
         iu = node2idx[u]
@@ -2221,10 +2698,19 @@ def duo_spec(
                 scores_local,
                 node2idx,
                 frac_sweep=frac_sweep,
-                fine_frac=frac_sweep[0] if frac_sweep else 0.99,
+                fine_frac=fine_max_frac,
                 S0=S0,
                 stable_k=stable_k,
                 debug=metric_debug,
+                fine_mode="target_blobs",
+                target_n_blobs_low=band_low,
+                target_n_blobs_high=band_high,
+                min_target_blobs=min_target_blobs,
+                max_target_blobs=max_target_blobs,
+                fine_min_frac=fine_min_frac,
+                fine_max_frac=fine_max_frac,
+                fine_search_iters=fine_search_iters,
+                merge_singletons=merge_singletons,
             )
             r_geo = geo_info["r_geo"]
             bridge_score = geo_info["bridge_score"]
@@ -2232,6 +2718,7 @@ def duo_spec(
             # Compact blob ids to 0..n_blobs-1 for downstream community proxy.
             _, blob_comp_per_node = np.unique(blob_id_per_node, return_inverse=True)
             balls = blob_comp_per_node.copy()
+            blob_id_per_node = geo_info["blob_id_per_node"]
 
             if r_geo.size == 0:
                 conf_min = conf_med = conf_max = float("nan")
@@ -2260,14 +2747,39 @@ def duo_spec(
                 coarse_ids = np.zeros(n_blobs, dtype=int)
                 n_coarse = int(n_blobs)
             else:
-                coarse_ids = community_proxy_persistence_on_blob_graph(
-                    blob_edges,
-                    blob_weights,
-                    num_blobs=n_blobs,
-                    K=K,
-                    frac_sweep=frac_sweep,
-                    stable_k=stable_k,
-                )
+                if community_proxy == "dsu":
+                    coarse_ids = community_proxy_persistence_on_blob_graph(
+                        blob_edges,
+                        blob_weights,
+                        num_blobs=n_blobs,
+                        K=K,
+                        frac_sweep=frac_sweep,
+                        stable_k=stable_k,
+                    )
+                elif community_proxy == "louvain":
+                    B = nx.Graph()
+                    B.add_nodes_from(range(n_blobs))
+                    for (u_b, v_b), w_b in zip(blob_edges, blob_weights):
+                        B.add_edge(int(u_b), int(v_b), weight=float(w_b))
+                    coarse_ids = _louvain_partition_exact_k(
+                        B,
+                        K,
+                        resolution=float(louvain_resolution),
+                        seed=0,
+                    )
+                elif community_proxy == "leiden":
+                    B = nx.Graph()
+                    B.add_nodes_from(range(n_blobs))
+                    for (u_b, v_b), w_b in zip(blob_edges, blob_weights):
+                        B.add_edge(int(u_b), int(v_b), weight=float(w_b))
+                    coarse_ids = _leiden_partition_exact_k(
+                        B,
+                        K,
+                        resolution=float(leiden_resolution),
+                        seed=0,
+                    )
+                else:
+                    raise ValueError(f"Unknown community_proxy '{community_proxy}'")
                 n_coarse = int(len(np.unique(coarse_ids)))
 
             if blob_comp_per_node.size:
@@ -2303,8 +2815,35 @@ def duo_spec(
             gate_power=gate_power,
             gate_floor=gate_floor,
             use_comm_boost=use_comm_boost,
+            comm_boost_psame_thr=comm_boost_psame_thr,
+            comm_boost_rgeo_max=comm_boost_rgeo_max,
+            scores_local=scores_local,
+            geo_fallback_alpha=geo_fallback_alpha,
+            geo_fallback_mode=geo_fallback_mode,
         )
         t_rw_end = time.perf_counter()
+
+        if strength_preserve:
+            eps = 1e-12
+            curr_strength = np.zeros(n_nodes, dtype=float)
+            for u, v, d in subG.edges(data=True):
+                w = float(d.get("weight", 1.0))
+                iu = node2idx[u]
+                iv = node2idx[v]
+                curr_strength[iu] += w
+                curr_strength[iv] += w
+
+            factors = (base_strength + eps) / (curr_strength + eps)
+            factors = np.maximum(factors, 0.0)
+
+            for u, v, d in subG.edges(data=True):
+                iu = node2idx[u]
+                iv = node2idx[v]
+                s = float(np.sqrt(factors[iu] * factors[iv]))
+                w = float(d.get("weight", 1.0))
+                w_new = w * (s ** strength_eta)
+                w_new = min(w_cap, max(w_min, w_new))
+                d["weight"] = w_new
 
 
         print(
@@ -2361,7 +2900,7 @@ def duo_spec(
                     f"{em} (max |Δobj| over last {conv_window} iters = "
                     f"{max_delta:.3e})"
                 )
-            break
+                break
 
     scores_local = edge_locality_scores(subG, edges, metric=local_score) if len(edges) > 0 else np.zeros(0, dtype=float)
     if len(edges) > 0:
@@ -2371,10 +2910,19 @@ def duo_spec(
             scores_local,
             node2idx,
             frac_sweep=frac_sweep,
-            fine_frac=frac_sweep[0] if frac_sweep else 0.99,
+            fine_frac=fine_max_frac,
             S0=S0,
             stable_k=stable_k,
             debug=metric_debug,
+            fine_mode="target_blobs",
+            target_n_blobs_low=band_low,
+            target_n_blobs_high=band_high,
+            min_target_blobs=min_target_blobs,
+            max_target_blobs=max_target_blobs,
+            fine_min_frac=fine_min_frac,
+            fine_max_frac=fine_max_frac,
+            fine_search_iters=fine_search_iters,
+            merge_singletons=merge_singletons,
         )
         r_geo_final = geo_info_final["r_geo"]
         blob_id_final = geo_info_final["blob_id_per_node"]

@@ -6,6 +6,7 @@ from algorithms.duo_spec import (
     duo_spec,
     detection_stats,
     get_true_communities,
+    bp_postprocess_log_squash,
 )
 import os
 import json
@@ -36,8 +37,8 @@ def coords_str2arr(G: nx.Graph, dim = 16):
     return new_G
 
 if __name__ == "__main__":
-
-    G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
+    # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
     G = coords_str2arr(G)
 
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
@@ -49,11 +50,9 @@ if __name__ == "__main__":
     beliefs_pre, preds_pre, node2idx_pre, _ = belief_propagation_weighted(
         G,
         q=K,
-        max_iter=200,
-        tol=1e-4,
-        damping=0.5,
+        max_iter=1000,
         seed=0,
-        init="random",
+        damping=0.7
     )
     true_communities = get_true_communities(G, node2idx=node2idx_pre, attr="comm")
     stats_pre = detection_stats(preds_pre, true_communities)
@@ -62,38 +61,37 @@ if __name__ == "__main__":
     res = duo_spec(
         G,
         K=K,
-        max_em_iters=75,
-        min_em_iters=10,
-        w_min=0.05,
-        w_cap=3.0,
-        conv_tol=1e-10,
-        conv_window=10,
-        update_scale=0.8,
-        lam_geo=0.30,
-        lam_comm_boost=0.02,
-        S0=20,
-        frac_sweep=(0.995, 0.99, 0.98, 0.97, 0.95),
-        local_score="cn_over_sqrtdeg",
-        geo_gate_enabled=True,
-        gate_power=1.0,
-        gate_floor=0.10,
-        stable_k=2,
-        delta_cap=0.10,
-        use_comm_boost=True,
-        random_state=0,
+        max_em_iters=50,
+        min_em_iters=20,
+        community_proxy = "leiden"
     )
 
     G_den = res["G_final"]
 
-    # BP on denoised graph (post-denoising)
+    # BP on denoised graph (post-denoising) with log-squashed weights
+    bp_clip = 2.0
+    bp_gamma = 1.5
+    bp_recenter = "mean"
+    bp_w_min = 0.05
+    bp_w_cap = 3.0
+
+    # G_bp = bp_postprocess_log_squash(
+    #     G_den,
+    #     weight_key="weight",
+    #     clip=bp_clip,
+    #     gamma=bp_gamma,
+    #     recenter=bp_recenter,
+    #     w_min=bp_w_min,
+    #     w_cap=bp_w_cap,
+    # )
+
     beliefs_post, preds_post, node2idx_post, _ = belief_propagation_weighted(
         G_den,
         q=K,
-        max_iter=200,
-        tol=1e-4,
-        damping=0.5,
+        max_iter=1000,
         seed=0,
-        init="random",
+        damping=0.7,
+        init="spectral"
     )
     true_communities_post = get_true_communities(G_den, node2idx=node2idx_post, attr="comm")
     stats_post = detection_stats(preds_post, true_communities_post)
@@ -160,6 +158,9 @@ if __name__ == "__main__":
         "delta_cap": 0.10,
         "gate_power": 1.0,
         "gate_floor": 0.10,
+        "bp_post_clip": bp_clip,
+        "bp_post_gamma": bp_gamma,
+        "bp_post_recenter": bp_recenter,
     }
 
     os.makedirs("results/amazon_orig", exist_ok=True)

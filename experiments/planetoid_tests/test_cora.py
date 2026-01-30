@@ -53,75 +53,34 @@ if __name__ == "__main__":
     print("Loading graph")
     G = grab_planetoid_data("PubMed")
     G = to_networkx_graph(G)
-    print(f"Original graph has {len(G)} nodes and {len(G.edges())} edges")
-    
-    # Split graph into patches
-    # patches, node_mapping = split_graph_into_patches(G, patch_size=2000)
-    # print(f"Split graph into {len(patches)} patches")
-    # print(f"Node mapping contains {len(node_mapping)} nodes")
-    
-    duo_params = dict(
-    K               = 3,
-    num_balls       = 8,    
-    config          = 'motif',
-
-    max_em_iters    = 60,
-    warmup_rounds   = 0,
-    anneal_steps    = 8,
-
-    # community masks & strengths
-    comm_cut        = 0.80,
-    shrink_comm     = 0.05,
-    boost_cut_comm  = 0.90,
-    boost_comm      = 0.80,
-
-    # geometry disabled
-    geo_cut         = 0.80,
-    shrink_geo      = 0.40,
-    boost_cut_geo   = 0.97,
-    boost_geo       = 0.10,
-
-    # weight bounds
-    w_min           = 0.01,
-    w_cap           = 2.00,
-
-    tol             = 1e-5,
-    patience        = 5,
-    random_state    = 42,
-    base_seed       = 0,
-    theta           = 20,
-    spec_params     = dict(
-        dim       = 64,
-        walk_len  = 40,
-        num_walks = 2,
-        window    = 5,
-        weight_pow=1.0,
-    )
-    )
-    
-    res = duo_spec(G, **duo_params)
-    G_combined = res["G_final"]
-    preds_duo = res["communities"]
-    true_communities = get_true_communities(G, attr="comm")
-    stats = detection_stats(preds_duo, true_communities)
-    print("DuoSpec stats")
-    print(stats)
-    print(f"Finished detection stats")   
-
-    # # Run belief propagation on combined graph
+    num_comms = 3
+    true_labels = get_true_communities(G, node2idx=None, attr="comm")
     _, preds, _, _ = belief_propagation_weighted(
-        G_combined, 
-        q=3, 
-        max_iter=10000,
+        G,
+        q=num_comms,
+        seed=0,
+        init="spectral",
     )
-    stats = detection_stats(preds, true_communities)
-    print("BP + DUO stats")
-    print(stats)
-    print(f"Finished detection stats")   
-
-    # Get detection stats
-    _, preds, _, _ = belief_propagation(G, q=3, max_iter=10000)
-    stats = detection_stats(preds, true_communities)
-    print("BP stats")
-    print(stats)
-    print(f"Finished detection stats")   
+    stats = detection_stats(preds, true_labels)
+    print("\n=== BP Accuracy ===")
+    for k, v in stats.items():
+        print(f"{k:>25s} : {v}")
+    
+    res_duo = duo_spec(
+        G,
+        K=num_comms,
+        max_em_iters=50,
+        community_proxy="leiden"
+    )
+    
+    G_res = res_duo['G_final']
+    _, preds, _, _ = belief_propagation_weighted(
+                                            G_res, 
+                                            q=num_comms, 
+                                            seed=0, 
+                                            init="spectral"
+                                                )
+    stats = detection_stats(preds, true_labels)
+    print("\n=== Post-Duospec BP ===")
+    for k, v in stats.items():
+        print(f"{k:>25s} : {v}")
