@@ -1,68 +1,17 @@
 import os
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 import networkx as nx
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from block_models.sbm.sbm import generate_noisy_sbm
 from algorithms.duo_spec import (
     duo_spec,
-    bethe_hessian,
     detection_stats,
     get_true_communities,
-    rescale_graph_weights_for_downstream,
-    compute_initial_avg_degree,
-    prune_for_bh_weight_aware,
 )
-from algorithms.spectral_ops.attention import motif_spectral_embedding
 from algorithms.bp.vectorized_bp import belief_propagation_weighted
-
-
-def _ensure_edge_weights(G: nx.Graph) -> None:
-    """Ensure every edge has a numeric 'weight' attribute."""
-    for _, _, d in G.edges(data=True):
-        d.setdefault("weight", 1.0)
-
-
-def _accuracy_bethe(
-    G: nx.Graph,
-    K: int,
-    random_state: int = 0,
-) -> float:
-    """Bethe–Hessian spectral clustering accuracy."""
-    _ensure_edge_weights(G)
-    Q, hard, node2idx, _ = bethe_hessian(
-        G,
-        q=K,
-        random_state=random_state,
-        weight_from_dist=False,   # use existing edge weights (or 1.0)
-    )
-    true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
-    stats = detection_stats(hard, true_labels)
-    return float(stats["accuracy"])
-
-
-def _accuracy_motif(
-    G: nx.Graph,
-    K: int,
-    random_state: int = 0,
-) -> float:
-    """Motif spectral embedding accuracy."""
-    _ensure_edge_weights(G)
-    Q, hard, node2idx, _ = motif_spectral_embedding(
-        G,
-        q=K,
-        random_state=random_state,
-        beta=0.2,
-        use_edge_weights=True,
-        weight_key="weight",
-        weight_pow=0.5,
-    )
-    true_labels = get_true_communities(G, node2idx=node2idx, attr="comm")
-    stats = detection_stats(hard, true_labels)
-    return float(stats["accuracy"])
 
 
 def _accuracy_bp(
@@ -87,32 +36,6 @@ def _accuracy_bp(
     return float(stats["accuracy"])
 
 
-def _squash_weights_for_motif(
-    G: nx.Graph,
-    *,
-    weight_key: str = "weight",
-    lo_pct: float = 5.0,
-    hi_pct: float = 95.0,
-) -> nx.Graph:
-    H = G.copy()
-    if H.number_of_edges() == 0:
-        return H
-    w_vals = np.array(
-        [float(d.get(weight_key, 1.0)) for _, _, d in H.edges(data=True)],
-        dtype=float,
-    )
-    w_lo = float(np.percentile(w_vals, lo_pct))
-    w_hi = float(np.percentile(w_vals, hi_pct))
-    if not np.isfinite(w_lo) or not np.isfinite(w_hi) or w_hi <= w_lo:
-        return H
-    for u, v, d in H.edges(data=True):
-        w = float(d.get(weight_key, 1.0))
-        w_s = min(max(w, w_lo), w_hi)
-        w_sq = 0.5 + 1.5 * (w_s - w_lo) / (w_hi - w_lo + 1e-12)
-        d[weight_key] = float(w_sq)
-    return H
-
-
 def run_duospec_sbm_experiment(
     num_graphs: int = 1,
     *,
@@ -128,10 +51,9 @@ def run_duospec_sbm_experiment(
     """
     Generate synthetic graphs via `generate_noisy_sbm` and evaluate:
 
-    1) Bethe–Hessian spectral clustering (control, pre‑denoising).
-    2) Motif spectral embedding (control, pre‑denoising).
-    3) Both (1) and (2) on the DuoSpec‑denoised graph.
-    4) Pre/post proxy geometry‑locality correlation from DuoSpec.
+    1) Belief Propagation (BP) on original graph (pre-denoising).
+    2) BP on the DuoSpec-denoised graph (post-denoising).
+    3) Pre/post proxy geometry-locality correlation from DuoSpec.
     """
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
@@ -156,19 +78,7 @@ def run_duospec_sbm_experiment(
             f"m={len(G_true.edges())}"
         )
 
-        # 2) Pre‑denoising accuracies
-        try:
-            acc_bh_pre = _accuracy_bethe(G_true, K=K, random_state=seed)
-        except Exception as e:
-            print(f"[WARN] Bethe-Hessian pre-denoising failed: {e}")
-            acc_bh_pre = np.nan
-
-        try:
-            acc_motif_pre = _accuracy_motif(G_true, K=K, random_state=seed)
-        except Exception as e:
-            print(f"[WARN] motif_spectral_embedding pre-denoising failed: {e}")
-            acc_motif_pre = np.nan
-
+        # 2) Pre-denoising BP accuracy
         try:
             acc_bp_pre = _accuracy_bp(G_true, K=K, random_state=seed)
         except Exception as e:
@@ -203,8 +113,7 @@ def run_duospec_sbm_experiment(
                 mean_delta_comm = np.nan
                 frac_boosted = np.nan
                 frac_shrunk = np.nan
-            # Sanity check: ensure denoising produced non-constant weights when edges exist,
-            # and plot a histogram of the resulting edge-weight distribution.
+            # Sanity check: ensure denoising produced non-constant weights when edges exist.
 
             proxy_before = res_duo["proxy_corr_before"]["corr_value"]
             proxy_after = res_duo["proxy_corr_after"]["corr_value"]
@@ -229,56 +138,20 @@ def run_duospec_sbm_experiment(
             frac_boosted = np.nan
             frac_shrunk = np.nan
 
-        # 4) Post‑denoising accuracies:
-        #    - Bethe–Hessian on 0/1 pruned graph (bottom 25% edges removed, connectivity preserved).
-        #    - Motif on weighted denoised graph with log-domain edge weights.
-        #    - BP on full denoised weighted graph (unchanged).
-        # 4) Post‑denoising accuracies:
-        #    - Bethe–Hessian on 0/1 pruned graph with target mean degree = original.
-        #    - Motif on weighted denoised graph with log-domain edge weights (and optional squash).
-        #    - BP on full denoised weighted graph (unchanged).
-        # Original mean degree
-        mean_deg0 = compute_initial_avg_degree(G_true)
-
-        try:
-            G_bh = prune_for_bh_weight_aware(
-                G_denoised,
-                weight_key="weight",
-                mean_degree_target=mean_deg0,
-            )
-            acc_bh_post = _accuracy_bethe(G_bh, K=K, random_state=seed)
-        except Exception as e:
-            print(f"[WARN] Bethe-Hessian post-denoising failed: {e}")
-            acc_bh_post = np.nan
-
-        try:
-            acc_motif_post = _accuracy_motif(G_denoised, K=K, random_state=seed)
-        except Exception as e:
-            print(f"[WARN] motif_spectral_embedding post-denoising failed: {e}")
-            acc_motif_post = np.nan
-
+        # 3) Post-denoising BP accuracy
         try:
             acc_bp_post = _accuracy_bp(G_denoised, K=K, random_state=seed)
         except Exception as e:
             print(f"[WARN] BP post-denoising failed: {e}")
             acc_bp_post = np.nan
 
-        # For BH and Motif we do not rescale weights; postR equals post.
-        acc_bh_post_rescaled = acc_bh_post
-        acc_motif_post_rescaled = acc_motif_post
-        # BP also uses raw denoised weights without additional rescaling.
+        # BP uses raw denoised weights without additional rescaling.
         acc_bp_post_rescaled = acc_bp_post
 
         # Per-seed compact summary
-        d_bh = acc_bh_post - acc_bh_pre
-        d_motif = acc_motif_post - acc_motif_pre
         d_bp = acc_bp_post - acc_bp_pre
         print(
             f"    Seed={seed}: "
-            f"BH pre={acc_bh_pre:.3f} post={acc_bh_post:.3f} (Δ{d_bh:+.3f}) "
-            f"postR={acc_bh_post_rescaled:.3f} (Δ{acc_bh_post_rescaled - acc_bh_pre:+.3f}) | "
-            f"Motif pre={acc_motif_pre:.3f} post={acc_motif_post:.3f} (Δ{d_motif:+.3f}) "
-            f"postR={acc_motif_post_rescaled:.3f} (Δ{acc_motif_post_rescaled - acc_motif_pre:+.3f}) | "
             f"BP pre={acc_bp_pre:.3f} post={acc_bp_post:.3f} (Δ{d_bp:+.3f}) "
             f"postR={acc_bp_post_rescaled:.3f} (Δ{acc_bp_post_rescaled - acc_bp_pre:+.3f})"
         )
@@ -293,14 +166,8 @@ def run_duospec_sbm_experiment(
                 p_out=p_out,
                 sigma=sigma,
                 geo_discriminator="dSu_fineblob_persistence",
-                acc_bh_pre=acc_bh_pre,
-                acc_motif_pre=acc_motif_pre,
                 acc_bp_pre=acc_bp_pre,
-                acc_bh_post=acc_bh_post,
-                acc_motif_post=acc_motif_post,
                 acc_bp_post=acc_bp_post,
-                acc_bh_post_rescaled=acc_bh_post_rescaled,
-                acc_motif_post_rescaled=acc_motif_post_rescaled,
                 acc_bp_post_rescaled=acc_bp_post_rescaled,
                 mean_abs_delta=mean_abs_delta,
                 frac_w_min=frac_w_min,
@@ -324,25 +191,20 @@ def run_duospec_sbm_experiment(
 
     # Final mean accuracies and deltas (single structural DuoSpec configuration)
     print("\n=== Summary over all graphs (structural DuoSpec) ===")
-    for key, label in [
-        ("acc_bh", "Bethe-Hessian"),
-        ("acc_motif", "Motif"),
-        ("acc_bp", "BP"),
-    ]:
-        pre = df[f"{key}_pre"]
-        post = df[f"{key}_post"]
-        postR = df[f"{key}_post_rescaled"]
-        pre_mean = float(pre.mean())
-        post_mean = float(post.mean())
-        postR_mean = float(postR.mean())
-        delta_mean = float((post - pre).mean())
-        deltaR_mean = float((postR - pre).mean())
-        print(
-            f"  {label:12s} "
-            f"pre={pre_mean:.4f} "
-            f"post={post_mean:.4f} Δpost={delta_mean:+.4f} "
-            f"postR={postR_mean:.4f} ΔpostR={deltaR_mean:+.4f}"
-        )
+    pre = df["acc_bp_pre"]
+    post = df["acc_bp_post"]
+    postR = df["acc_bp_post_rescaled"]
+    pre_mean = float(pre.mean())
+    post_mean = float(post.mean())
+    postR_mean = float(postR.mean())
+    delta_mean = float((post - pre).mean())
+    deltaR_mean = float((postR - pre).mean())
+    print(
+        f"  BP            "
+        f"pre={pre_mean:.4f} "
+        f"post={post_mean:.4f} Δpost={delta_mean:+.4f} "
+        f"postR={postR_mean:.4f} ΔpostR={deltaR_mean:+.4f}"
+    )
 
     print("\n=== Denoiser statistics (final EM iteration, averaged over all runs) ===")
     for key in [

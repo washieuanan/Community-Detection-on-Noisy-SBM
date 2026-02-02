@@ -2581,7 +2581,7 @@ def duo_spec(
     update_scale: float = 0.8,
     metric_debug: bool = False,
     # Edge-denoising strengths (geometry shrink + optional community boost)
-    lam_geo: float = 0.15,
+    lam_geo: float = 0.05,
     lam_comm_boost: float = 0.015,
     # Geometry / community DSU controls
     S0: int = 50,
