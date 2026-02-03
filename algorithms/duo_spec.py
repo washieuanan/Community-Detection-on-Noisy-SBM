@@ -3090,4 +3090,3 @@ def get_true_communities(G: nx.Graph, *, node2idx: Dict[int,int] | None = None, 
     for u,i in node2idx.items():
         arr[i] = G.nodes[u][attr]
     return arr
-

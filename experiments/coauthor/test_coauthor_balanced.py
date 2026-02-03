@@ -1,54 +1,97 @@
-from algorithms.bp.old.vectorized_geometric_bp import (
-    belief_propagation,
-    detection_stats,
-    get_true_communities,
-)
-# from experiments.observations.standard_observe import PairSamplingObservation, get_coordinate_distance
-
-import numpy as np
+import torch
 import networkx as nx
+from torch_geometric.datasets import Coauthor
+from torch_geometric.datasets import KarateClub
+import numpy as np
+from torch_geometric.transforms import ToUndirected
 import csv
-
-from algorithms.bp.old.duo_bp import (
-    duo_bp,
-    create_dist_observed_subgraph,
+from collections import defaultdict
+from algorithms.bp.vectorized_bp import (
+    get_true_communities,
+    belief_propagation,
+    belief_propagation_weighted,
+    detection_stats
 )
-# from experiments.community_detection.bp.bethe_duo_bp import (
-#     duo_bp
-# )
 from algorithms.duo_spec import duo_spec
-import os
-import json
-import logging
-import random
-from algorithms.bp.vectorized_bp import belief_propagation, belief_propagation_weighted
 from algorithms.spectral_ops.attention import motif_spectral_embedding
-import math
-from typing import List, Dict
-from experiments.planetoid_tests.load_planetoid_data import grab_planetoid_data, to_networkx_graph
 
-def coords_str2arr(G: nx.Graph, dim = 16):
+def load_coauthor(name = 'Physics'):
     """
-    for each coord, convert string formatted coord to numpy array
+    Load the twitch dataset and convert it to a NetworkX graph.
     """
-    new_G = nx.Graph()
-    for n in G.nodes():
-        coord_str = G.nodes[n]["coords"]
-        coord_arr = np.fromstring(coord_str, sep=",")
-        if len(coord_arr) != dim:
-            coord_arr = np.zeros(dim)
-        new_G.add_node(int(n), coords=coord_arr, asin=G.nodes[n]["asin"], comm=G.nodes[n]["comm"])
+    # Load the dataset
+    dataset = Coauthor(root='data/Coauthor', name=name)
+    num_graphs = len(dataset)
+    print(f"Number of graphs: {num_graphs}")
+    data = dataset[0]
+    # Convert to undirected graph
+    
+    # Create NetworkX graph
+    edge_index = data.edge_index.numpy()
+    G = nx.Graph()
+    
+    # Add nodes with community labels and features
+    for i in range(data.num_nodes):
+        G.add_node(i, 
+                   comm=int(data.y[i].item()),
+                   coords=data.x[i].numpy())
         
-    for u, v in G.edges():
-        if "dist" in G.edges[u, v]:
-            dist = G.edges[u, v]["dist"]
-            if isinstance(dist, str):
-                dist = float(dist)
-            new_G.add_edge(int(u), int(v), dist=dist)
-    new_G.graph = G.graph.copy()
-    new_G = nx.relabel.convert_node_labels_to_integers(new_G, first_label=0)
-    return new_G
+    # Add edges
+    # Calculate distances and add edges with distance attributes
+    edges = list(zip(edge_index[0], edge_index[1]))
+    dists = []
+    for u, v in edges:
+        # Get coordinates for nodes
+        coord_u = G.nodes[u]['coords'] 
+        coord_v = G.nodes[v]['coords']
+        # Calculate cosine similarity
+        similarity = np.dot(coord_u, coord_v) / (np.linalg.norm(coord_u) * np.linalg.norm(coord_v))
+        # Convert similarity to distance (0 similarity -> dist 2, 1 similarity -> dist 0)
+        dist = 2 * (1 - similarity)
+        dists.append(dist)
+    
+    dists = np.array(dists)
+    
+    # Add edges with distances
+    G.add_edges_from([(u,v,{'dist':d}) for (u,v),d in zip(edges,dists)])
+    return G
 
+# def load_karate():
+#     dataset = KarateClub()
+#     num_graphs = len(dataset)
+#     print(f"Number of graphs: {num_graphs}")
+#     data = dataset[0]
+#     # Convert to undirected graph
+
+#     # Create NetworkX graph
+#     edge_index = data.edge_index.numpy()
+#     G = nx.Graph()
+
+#     # Add nodes with community labels and features
+#     for i in range(data.num_nodes):
+#         G.add_node(i, 
+#                    comm=int(data.y[i].item()),
+#                    coords=data.x[i].numpy())
+    
+#     # Add edges
+#     # Calculate distances and add edges with distance attributes
+#     edges = list(zip(edge_index[0], edge_index[1]))
+#     dists = []
+#     for u, v in edges:
+#         # Get coordinates for nodes
+#         coord_u = G.nodes[u]['coords'] 
+#         coord_v = G.nodes[v]['coords']
+#         # Calculate cosine similarity
+#         similarity = np.dot(coord_u, coord_v) / (np.linalg.norm(coord_u) * np.linalg.norm(coord_v))
+#         # Convert similarity to distance (0 similarity -> dist 2, 1 similarity -> dist 0)
+#         dist = 2 * (1 - similarity)
+#         dists.append(dist)
+
+#     dists = np.array(dists)
+
+#     # Add edges with distances
+#     G.add_edges_from([(u,v,{'dist':d}) for (u,v),d in zip(edges,dists)])
+#     return G
 def compute_graph_stats(G, true_labels):
     """Compute graph statistics."""
     num_nodes = G.number_of_nodes()
@@ -80,27 +123,28 @@ def compute_graph_stats(G, true_labels):
     }
 
 if __name__ == "__main__":
-    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
-    print("Loading graph")
-    G = grab_planetoid_data("Cora")
-    G = to_networkx_graph(G)
+    # G = load_karate()
+    G = load_coauthor(name='Physics')
     true_labels = get_true_communities(G, node2idx=None, attr="comm")
     
     # ========================================================================
     # FILTER TO TOP 2 COMMUNITIES BY SIZE (comment out to use all communities)
     # ========================================================================
     unique_comms, counts = np.unique(true_labels, return_counts=True)
-    top2_indices = np.argsort(counts)[-2:]  # Top 2 largest
-    top2_comms = unique_comms[top2_indices]
+    # Get indices of communities by ascending size
+    sorted_indices = np.argsort(counts)
+    # Get indices for 2nd and 3rd largest (i.e., -3 and -2)
+    second_third_indices = sorted_indices[-3:-1]  # [-3, -2]
+    second_third_comms = unique_comms[second_third_indices]
     print(f"Original communities: {len(unique_comms)}, sizes: {dict(zip(unique_comms, counts))}")
-    print(f"Filtering to top 2 communities: {top2_comms} with sizes: {counts[top2_indices]}")
+    print(f"Filtering to 2nd and 3rd largest communities: {second_third_comms} with sizes: {counts[second_third_indices]}")
     
-    # Filter nodes to only those in top 2 communities
-    nodes_to_keep = [n for n in G.nodes() if G.nodes[n]["comm"] in top2_comms]
+    # Filter nodes to only those in the 2nd and 3rd largest communities
+    nodes_to_keep = [n for n in G.nodes() if G.nodes[n]["comm"] in second_third_comms]
     G = G.subgraph(nodes_to_keep).copy()
     
     # Relabel communities to 0 and 1
-    comm_mapping = {int(top2_comms[0]): 0, int(top2_comms[1]): 1}
+    comm_mapping = {int(second_third_comms[0]): 0, int(second_third_comms[1]): 1}
     for n in G.nodes():
         G.nodes[n]["comm"] = comm_mapping[G.nodes[n]["comm"]]
     
@@ -118,7 +162,6 @@ if __name__ == "__main__":
         q=num_comms,
         seed=0,
         init="spectral",
-        max_iter=10000,
     )
     stats_pre = detection_stats(preds_pre, true_labels)
     print("\n=== BP Accuracy (Pre-Denoise) ===")
@@ -130,7 +173,7 @@ if __name__ == "__main__":
         G,
         K=num_comms,
         max_em_iters=20,
-        community_proxy="leiden",
+        community_proxy="leiden"
     )
     
     # Post-denoise BP
@@ -139,8 +182,7 @@ if __name__ == "__main__":
                                             G_res, 
                                             q=num_comms, 
                                             seed=0, 
-                                            init="spectral",
-                                            max_iter=10000,
+                                            init="spectral"
                                                 )
     stats_post = detection_stats(preds_post, true_labels)
     print("\n=== Post-Duospec BP ===")
@@ -148,7 +190,7 @@ if __name__ == "__main__":
         print(f"{k:>25s} : {v}")
     
     # Save to CSV
-    csv_file = "experiments/planetoid_tests/cora_results.csv"
+    csv_file = "experiments/coauthor/coauthor_balanced_results.csv"
     with open(csv_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=[
             'num_nodes', 'num_edges', 'nodes_per_community', 'average_degree', 'clustering_coefficient',

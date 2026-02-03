@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 
 from algorithms.bp.vectorized_bp import (
     get_true_communities,
@@ -12,6 +13,36 @@ import numpy as np
 import networkx as nx
 from algorithms.duo_spec import duo_spec
 from algorithms.spectral_ops.attention import motif_spectral_embedding
+
+def compute_graph_stats(G, true_labels):
+    """Compute graph statistics."""
+    num_nodes = G.number_of_nodes()
+    num_edges = G.number_of_edges()
+    
+    # Nodes per community
+    unique_comms, counts = np.unique(true_labels, return_counts=True)
+    nodes_per_comm = dict(zip(unique_comms, counts))
+    nodes_per_comm_str = ",".join([f"{k}:{v}" for k, v in sorted(nodes_per_comm.items())])
+    
+    # Average degree
+    if num_nodes > 0:
+        avg_degree = 2.0 * num_edges / num_nodes
+    else:
+        avg_degree = 0.0
+    
+    # Clustering coefficient
+    try:
+        clustering_coeff = nx.average_clustering(G)
+    except:
+        clustering_coeff = float('nan')
+    
+    return {
+        'num_nodes': num_nodes,
+        'num_edges': num_edges,
+        'nodes_per_community': nodes_per_comm_str,
+        'average_degree': avg_degree,
+        'clustering_coefficient': clustering_coeff,
+    }
 
 
 if __name__ == "__main__":
@@ -42,18 +73,23 @@ if __name__ == "__main__":
     print(f"After filtering: {len(G.nodes())} nodes, {len(G.edges())} edges, {num_comms} communities")
     # ========================================================================
     
-    _, preds, _, _ = belief_propagation_weighted(
+    # Compute graph statistics
+    graph_stats = compute_graph_stats(G, true_labels)
+    
+    # Pre-denoise BP
+    _, preds_pre, _, _ = belief_propagation_weighted(
         G,
         q=num_comms,
         seed=0,
         init="spectral",
         max_iter=10000,
     )
-    stats = detection_stats(preds, true_labels)
-    print("\n=== BP Accuracy ===")
-    for k, v in stats.items():
+    stats_pre = detection_stats(preds_pre, true_labels)
+    print("\n=== BP Accuracy (Pre-Denoise) ===")
+    for k, v in stats_pre.items():
         print(f"{k:>25s} : {v}")
     
+    # Denoise
     res_duo = duo_spec(
         G,
         K=num_comms,
@@ -61,15 +97,48 @@ if __name__ == "__main__":
         community_proxy="leiden"
     )
     
+    # Post-denoise BP
     G_res = res_duo['G_final']
-    _, preds, _, _ = belief_propagation_weighted(
+    _, preds_post, _, _ = belief_propagation_weighted(
                                             G_res, 
                                             q=num_comms, 
                                             seed=0, 
                                             init="spectral",
                                             max_iter=10000,
                                                 )
-    stats = detection_stats(preds, true_labels)
+    stats_post = detection_stats(preds_post, true_labels)
     print("\n=== Post-Duospec BP ===")
-    for k, v in stats.items():
+    for k, v in stats_post.items():
         print(f"{k:>25s} : {v}")
+    
+    # Save to CSV
+    csv_file = "experiments/airports/airports_results.csv"
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            'num_nodes', 'num_edges', 'nodes_per_community', 'average_degree', 'clustering_coefficient',
+            'pre_accuracy', 'pre_num_vertices', 'pre_num_communities_predicted', 'pre_perm_p',
+            'pre_accuracy_0', 'pre_accuracy_1',
+            'post_accuracy', 'post_num_vertices', 'post_num_communities_predicted', 'post_perm_p',
+            'post_accuracy_0', 'post_accuracy_1',
+        ])
+        writer.writeheader()
+        
+        row = graph_stats.copy()
+        # Pre-denoise metrics
+        row['pre_accuracy'] = stats_pre.get('accuracy', float('nan'))
+        row['pre_num_vertices'] = stats_pre.get('num vertices', float('nan'))
+        row['pre_num_communities_predicted'] = stats_pre.get('num communities predicted', float('nan'))
+        row['pre_perm_p'] = stats_pre.get('perm_p', float('nan'))
+        row['pre_accuracy_0'] = stats_pre.get('accuracy_0', float('nan'))
+        row['pre_accuracy_1'] = stats_pre.get('accuracy_1', float('nan'))
+        # Post-denoise metrics
+        row['post_accuracy'] = stats_post.get('accuracy', float('nan'))
+        row['post_num_vertices'] = stats_post.get('num vertices', float('nan'))
+        row['post_num_communities_predicted'] = stats_post.get('num communities predicted', float('nan'))
+        row['post_perm_p'] = stats_post.get('perm_p', float('nan'))
+        row['post_accuracy_0'] = stats_post.get('accuracy_0', float('nan'))
+        row['post_accuracy_1'] = stats_post.get('accuracy_1', float('nan'))
+        
+        writer.writerow(row)
+    
+    print(f"\nResults saved to {csv_file}")

@@ -41,7 +41,7 @@ def compute_graph_stats(G, true_labels):
     }
 
 if __name__ == "__main__":
-    G = nx.read_gml("experiments/livejournal/livejournal.gml")  # returns a NetworkX graph
+    G = nx.read_gml("experiments/email_eu/email_eu.gml")  # returns a NetworkX graph
     
     
     # Ensure all edges have weights (default to 1.0)
@@ -90,7 +90,7 @@ if __name__ == "__main__":
         print(f"{k:>25s} : {v}")
     
     # Save to CSV
-    csv_file = "experiments/livejournal/livejournal_results.csv"
+    csv_file = "experiments/email_eu/email_eu_results.csv"
     with open(csv_file, 'w', newline='') as f:
         # Collect all possible accuracy keys (handle variable number of communities)
         all_keys = set(stats_pre.keys()) | set(stats_post.keys())

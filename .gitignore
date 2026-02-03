@@ -1,4 +1,5 @@
 stochastic/
+*.gz 
 
 amazon_metadata_test/amazon-meta.txt
 amazon_metadata_test/amazon_graph.gml

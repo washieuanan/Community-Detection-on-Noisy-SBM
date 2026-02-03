@@ -37,8 +37,9 @@ def coords_str2arr(G: nx.Graph, dim = 16):
     return new_G
 
 if __name__ == "__main__":
-    G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
+    # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
     # G = nx.read_gml("amazon_metadata_test/amz_allviddvd.gml")
+    G = nx.read_gml("amazon_metadata_test/amazon_hamming_musicbook.gml")
     G = coords_str2arr(G)
 
     print(f"Testing on classes: {G.graph['subclasses']} and {len(G.nodes())} nodes")
@@ -50,9 +51,8 @@ if __name__ == "__main__":
     beliefs_pre, preds_pre, node2idx_pre, _ = belief_propagation_weighted(
         G,
         q=K,
-        max_iter=1000,
+        max_iter=10000,
         seed=0,
-        damping=0.7
     )
     true_communities = get_true_communities(G, node2idx=node2idx_pre, attr="comm")
     stats_pre = detection_stats(preds_pre, true_communities)
@@ -61,7 +61,7 @@ if __name__ == "__main__":
     res = duo_spec(
         G,
         K=K,
-        max_em_iters=50,
+        max_em_iters=20,
         min_em_iters=20,
         community_proxy = "leiden"
     )
@@ -88,9 +88,8 @@ if __name__ == "__main__":
     beliefs_post, preds_post, node2idx_post, _ = belief_propagation_weighted(
         G_den,
         q=K,
-        max_iter=1000,
+        max_iter=10000,
         seed=0,
-        damping=0.7,
         init="spectral"
     )
     true_communities_post = get_true_communities(G_den, node2idx=node2idx_post, attr="comm")
@@ -164,7 +163,7 @@ if __name__ == "__main__":
     }
 
     os.makedirs("results/amazon_orig", exist_ok=True)
-    out_path = os.path.join("results/amazon_orig", "amazon_orig_duospec_bp.csv")
+    out_path = os.path.join("results/amazon_orig", "amazon_orig_40000.csv")
     try:
         import pandas as pd
 

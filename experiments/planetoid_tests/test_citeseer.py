@@ -82,7 +82,7 @@ def compute_graph_stats(G, true_labels):
 if __name__ == "__main__":
     # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
     print("Loading graph")
-    G = grab_planetoid_data("Cora")
+    G = grab_planetoid_data("CiteSeer")
     G = to_networkx_graph(G)
     true_labels = get_true_communities(G, node2idx=None, attr="comm")
     
@@ -148,7 +148,7 @@ if __name__ == "__main__":
         print(f"{k:>25s} : {v}")
     
     # Save to CSV
-    csv_file = "experiments/planetoid_tests/cora_results.csv"
+    csv_file = "experiments/planetoid_tests/citeseer_results.csv"
     with open(csv_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=[
             'num_nodes', 'num_edges', 'nodes_per_community', 'average_degree', 'clustering_coefficient',

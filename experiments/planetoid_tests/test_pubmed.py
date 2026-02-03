@@ -82,7 +82,7 @@ def compute_graph_stats(G, true_labels):
 if __name__ == "__main__":
     # G = nx.read_gml("amazon_metadata_test/amz_bookmusic.gml")
     print("Loading graph")
-    G = grab_planetoid_data("Cora")
+    G = grab_planetoid_data("PubMed")
     G = to_networkx_graph(G)
     true_labels = get_true_communities(G, node2idx=None, attr="comm")
     
