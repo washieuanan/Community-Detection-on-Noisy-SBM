@@ -74,7 +74,8 @@ if __name__ == "__main__":
         G,
         K=num_comms,
         max_em_iters=50,
-        community_proxy="leiden"
+        community_proxy="leiden",
+        local_score="adamic_adar"
     )
     
     # Post-denoise BP

@@ -78,6 +78,51 @@ def spectral_clustering(G: nx.Graph, q: int, *, seed: int = 0):
     return {node: int(label) for node, label in zip(G.nodes(), km.labels_)}
 
 
+def bethe_hessian_clustering(G: nx.Graph, q: int, *, seed: int = 0):
+    """Bethe Hessian spectral clustering for community detection."""
+    # 1) build adjacency and degree matrices
+    A = nx.adjacency_matrix(G).astype(np.float64)
+    n = A.shape[0]
+    degrees = np.ravel(A.sum(axis=1))
+    
+    # Compute r = sqrt(c) where c is the average degree
+    avg_degree = degrees.mean() if len(degrees) > 0 else 1.0
+    r = np.sqrt(max(avg_degree, 1.0))
+    
+    # 2) build Bethe Hessian: H(r) = (r^2 - 1)I - rA + D
+    D = sp.diags(degrees, format="csr")
+    I = sp.eye(n, format="csr")
+    H = (r * r - 1.0) * I - r * A + D
+    # symmetrize to avoid tiny nonsymmetric noise
+    H = (H + H.T) * 0.5
+    
+    # 3) compute smallest q+1 eigenvalues (most negative)
+    k = q + 1
+    ncv = min(n - 1, max(2*k + 1, k + 20))
+    try:
+        vals, vecs = eigsh(
+            H,
+            k=k,
+            which="SA",  # smallest algebraic (most negative)
+            tol=1e-4,
+            ncv=ncv,
+            maxiter=1000
+        )
+        # take the q eigenvectors with smallest eigenvalues
+        idx = np.argsort(vals)
+        vecs = vecs[:, idx[:q]]
+    except Exception:
+        # fallback: use dense eigensolver
+        H_dense = H.toarray()
+        evals, evecs = np.linalg.eigh(H_dense)
+        idx = np.argsort(evals)[:q]
+        vecs = evecs[:, idx]
+    
+    # 4) cluster & return
+    km = KMeans(n_clusters=q, random_state=seed).fit(np.real(vecs))
+    return {node: int(label) for node, label in zip(G.nodes(), km.labels_)}
+
+
 def init_beliefs(n: int, q: int, rng, labels=None, node2idx=None, bias: float = 0.2):
     B = rng.dirichlet(np.ones(q), size=n)
     if labels and node2idx:
@@ -956,7 +1001,7 @@ def belief_propagation_weighted(
     balance_regularization: float = 0.10,
     seed: int = 0,
     min_steps: int = 0,
-    init: Literal["random", "spectral"] = "random",
+    init: Literal["random", "spectral", "bethe_hessian"] = "random",
     msg_init: Literal["random", "copy", "pre-group"] = "random",
     group_obs: List | None = None,
     min_sep: float | None = None,
@@ -1004,15 +1049,19 @@ def belief_propagation_weighted(
     # ---------------------------------------------------------------------
     #  Initial beliefs & messages
     # ---------------------------------------------------------------------
-    spectral_labels = (
-        spectral_clustering(G, q, seed=seed) if init == "spectral" else {}
-    )
+    if init == "spectral":
+        spectral_labels = spectral_clustering(G, q, seed=seed)
+    elif init == "bethe_hessian":
+        spectral_labels = bethe_hessian_clustering(G, q, seed=seed)
+    else:
+        spectral_labels = {}
+    
     beliefs = init_beliefs(n, q, rng, labels=spectral_labels, node2idx=node2idx)
     spec_arr = np.array([spectral_labels.get(idx2node[i], 0) for i in range(n)], int)
 
-    # Init prior + soften beliefs/messages (only for spectral init, q>1)
+    # Init prior + soften beliefs/messages (only for spectral/bethe_hessian init, q>1)
     pi0 = None
-    if init == "spectral" and q > 1 and len(spectral_labels) > 0:
+    if (init == "spectral" or init == "bethe_hessian") and q > 1 and len(spectral_labels) > 0:
         tiny = 1e-12
         alpha_pi0 = 2.0       # stronger smoothing for imbalance
         pi0_floor = 1e-4
@@ -1047,8 +1096,8 @@ def belief_propagation_weighted(
         eps=eps,
     )
     
-    # Soften initial messages toward pi0 (if spectral init was used)
-    if init == "spectral" and q > 1 and len(spectral_labels) > 0 and pi0 is not None:
+    # Soften initial messages toward pi0 (if spectral/bethe_hessian init was used)
+    if (init == "spectral" or init == "bethe_hessian") and q > 1 and len(spectral_labels) > 0 and pi0 is not None:
         tiny = 1e-12
         eta_msg = 0.06        # message softening amount
         messages_old = messages_old.astype(np.float64, copy=False)

@@ -131,6 +131,7 @@ if __name__ == "__main__":
         K=num_comms,
         max_em_iters=20,
         community_proxy="leiden",
+        local_score="adamic_adar"
     )
     
     # Post-denoise BP
@@ -148,7 +149,7 @@ if __name__ == "__main__":
         print(f"{k:>25s} : {v}")
     
     # Save to CSV
-    csv_file = "experiments/planetoid_tests/cora_results.csv"
+    csv_file = "experiments/planetoid_tests/pubmed_results.csv"
     with open(csv_file, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=[
             'num_nodes', 'num_edges', 'nodes_per_community', 'average_degree', 'clustering_coefficient',

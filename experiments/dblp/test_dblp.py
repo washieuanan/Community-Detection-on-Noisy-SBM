@@ -62,7 +62,8 @@ if __name__ == "__main__":
         G,
         q=num_comms,
         seed=0,
-        init="spectral",
+        init="bethe_hessian",
+        max_iter=10000,
     )
     stats_pre = detection_stats(preds_pre, true_labels)
     print("\n=== BP Accuracy (Pre-Denoise) ===")
@@ -74,7 +75,8 @@ if __name__ == "__main__":
         G,
         K=num_comms,
         max_em_iters=50,
-        community_proxy="leiden"
+        community_proxy="leiden",
+        local_score="adamic_adar"
     )
 
     # Post-denoise BP
@@ -83,7 +85,8 @@ if __name__ == "__main__":
                                         G_res, 
                                         q=num_comms, 
                                         seed=0, 
-                                        init="spectral"
+                                        init="bethe_hessian",
+                                        max_iter=10000,
                                             )
     stats_post = detection_stats(preds_post, true_labels)
     print("\n=== Post-Duospec BP ===")

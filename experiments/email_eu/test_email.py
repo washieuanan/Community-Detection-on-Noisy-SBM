@@ -73,7 +73,7 @@ if __name__ == "__main__":
         G,
         K=num_comms,
         max_em_iters=50,
-        community_proxy="leiden"
+        community_proxy="leiden",
     )
     
     # Post-denoise BP

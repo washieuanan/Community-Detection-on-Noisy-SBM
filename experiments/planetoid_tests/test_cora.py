@@ -131,6 +131,7 @@ if __name__ == "__main__":
         K=num_comms,
         max_em_iters=20,
         community_proxy="leiden",
+        local_score="ra"
     )
     
     # Post-denoise BP

@@ -52,37 +52,51 @@ def _conf_from_center(X, mu):
     Q    /= Q.sum(axis=1, keepdims=True)
     return Q
 
-
 def edge_locality_scores(
     G: nx.Graph,
     edges: np.ndarray,
     *,
     metric: str = "cn_over_sqrtdeg",
     eps: float = 1e-12,
+    weight_key: Optional[str] = None,
 ) -> np.ndarray:
     """
-    Fast per-edge locality score L(u,v) using only adjacency structure.
+    Fast per-edge locality score L(u,v) using adjacency structure.
 
-    Parameters
-    ----------
-    G : nx.Graph
-    edges : np.ndarray of shape (m,2)
-        Edge list whose order matches any masks/confidences that will
-        be applied later (e.g. in `_scale_edges`).
-    metric : {"cn_over_sqrtdeg","jaccard","common_neighbors"}
+    metric options:
+      - common_neighbors
+      - jaccard
+      - cn_over_sqrtdeg
+      - ra                (Resource Allocation)
+      - adamic_adar
+      - wcn_over_sqrtstrength   (weighted CN / sqrt(strengths))
+      - wra               (weighted RA)
+      - waa               (weighted Adamic-Adar)
+
+    If weight_key is provided (e.g., "weight"), weighted metrics will use it.
+    If weight_key is None, weighted metrics fall back to unweighted.
     """
     m = len(edges)
     if m == 0:
         return np.zeros(0, dtype=float)
 
     adj = G.adj
-    # Precompute degrees once
-    deg = {u: len(adj[u]) for u in G.nodes()}
+
+    # Precompute degrees and (optionally) strengths once
+    deg: Dict[Any, int] = {u: len(adj[u]) for u in G.nodes()}
+    if weight_key is not None:
+        strength: Dict[Any, float] = {}
+        for u in G.nodes():
+            s = 0.0
+            for nbr, data in adj[u].items():
+                s += float(data.get(weight_key, 1.0))
+            strength[u] = s
+    else:
+        strength = {}
 
     scores = np.empty(m, dtype=float)
 
     for i, (u, v) in enumerate(edges):
-        # Handle possible self-loops defensively
         if u == v:
             scores[i] = 0.0
             continue
@@ -90,31 +104,170 @@ def edge_locality_scores(
         adj_u = adj[u]
         adj_v = adj[v]
 
-        # Iterate over smaller neighborhood for common-neighbor count
+        # Iterate over smaller neighborhood
         if len(adj_u) > len(adj_v):
             adj_u, adj_v = adj_v, adj_u
             u_deg, v_deg = deg[v], deg[u]
+            u_node, v_node = v, u
         else:
             u_deg, v_deg = deg[u], deg[v]
+            u_node, v_node = u, v
 
         cn = 0
-        for w in adj_u:
-            if w in adj_v:
-                cn += 1
+        if metric in ("common_neighbors", "jaccard", "cn_over_sqrtdeg"):
+            for w in adj_u:
+                if w in adj_v:
+                    cn += 1
 
-        if metric == "common_neighbors":
-            s = float(cn)
-        elif metric == "jaccard":
-            # union size = d(u) + d(v) - CN
-            denom = (u_deg + v_deg - cn) + eps
-            s = float(cn) / denom
-        else:  # "cn_over_sqrtdeg" default
-            denom = math.sqrt(u_deg * v_deg + eps)
-            s = float(cn) / denom if denom > 0 else 0.0
+            if metric == "common_neighbors":
+                s = float(cn)
+            elif metric == "jaccard":
+                denom = (u_deg + v_deg - cn) + eps
+                s = float(cn) / denom
+            else:  # cn_over_sqrtdeg
+                denom = math.sqrt(u_deg * v_deg + eps)
+                s = float(cn) / denom if denom > 0 else 0.0
 
-        scores[i] = s
+        elif metric == "ra":
+            # sum_{w in intersection} 1/deg(w)
+            acc = 0.0
+            for w in adj_u:
+                if w in adj_v:
+                    acc += 1.0 / (deg[w] + eps)
+            s = acc
+
+        elif metric == "adamic_adar":
+            acc = 0.0
+            for w in adj_u:
+                if w in adj_v:
+                    acc += 1.0 / (math.log(deg[w] + 1.0) + eps)
+            s = acc
+
+        elif metric == "wcn_over_sqrtstrength":
+            # weighted common-neighbor overlap:
+            # sum_{w in intersection} min(w(u,w), w(v,w))
+            # normalized by sqrt(str(u)*str(v))
+            if weight_key is None:
+                # fallback to unweighted
+                denom = math.sqrt(u_deg * v_deg + eps)
+                cn = 0
+                for w in adj_u:
+                    if w in adj_v:
+                        cn += 1
+                s = float(cn) / denom if denom > 0 else 0.0
+            else:
+                acc = 0.0
+                for w, data_uw in adj_u.items():
+                    if w in adj_v:
+                        w_uw = float(data_uw.get(weight_key, 1.0))
+                        w_vw = float(adj_v[w].get(weight_key, 1.0))
+                        acc += min(w_uw, w_vw)
+                denom = math.sqrt((strength[u] + eps) * (strength[v] + eps))
+                s = acc / denom
+
+        elif metric == "wra":
+            # weighted RA: sum min(w_uw, w_vw) / strength(w)
+            if weight_key is None:
+                acc = 0.0
+                for w in adj_u:
+                    if w in adj_v:
+                        acc += 1.0 / (deg[w] + eps)
+                s = acc
+            else:
+                acc = 0.0
+                for w, data_uw in adj_u.items():
+                    if w in adj_v:
+                        w_uw = float(data_uw.get(weight_key, 1.0))
+                        w_vw = float(adj_v[w].get(weight_key, 1.0))
+                        acc += min(w_uw, w_vw) / (strength.get(w, 0.0) + eps)
+                s = acc
+
+        elif metric == "waa":
+            # weighted AA: sum min(w_uw, w_vw) / log(1 + strength(w))
+            if weight_key is None:
+                acc = 0.0
+                for w in adj_u:
+                    if w in adj_v:
+                        acc += 1.0 / (math.log(deg[w] + 1.0) + eps)
+                s = acc
+            else:
+                acc = 0.0
+                for w, data_uw in adj_u.items():
+                    if w in adj_v:
+                        w_uw = float(data_uw.get(weight_key, 1.0))
+                        w_vw = float(adj_v[w].get(weight_key, 1.0))
+                        acc += min(w_uw, w_vw) / (math.log(1.0 + strength.get(w, 0.0)) + eps)
+                s = acc
+
+        else:
+            raise ValueError(f"Unknown metric '{metric}'")
+
+        scores[i] = float(s)
 
     return scores
+
+# def edge_locality_scores(
+#     G: nx.Graph,
+#     edges: np.ndarray,
+#     *,
+#     metric: str = "cn_over_sqrtdeg",
+#     eps: float = 1e-12,
+# ) -> np.ndarray:
+#     """
+#     Fast per-edge locality score L(u,v) using only adjacency structure.
+
+#     Parameters
+#     ----------
+#     G : nx.Graph
+#     edges : np.ndarray of shape (m,2)
+#         Edge list whose order matches any masks/confidences that will
+#         be applied later (e.g. in `_scale_edges`).
+#     metric : {"cn_over_sqrtdeg","jaccard","common_neighbors"}
+#     """
+#     m = len(edges)
+#     if m == 0:
+#         return np.zeros(0, dtype=float)
+
+#     adj = G.adj
+#     # Precompute degrees once
+#     deg = {u: len(adj[u]) for u in G.nodes()}
+
+#     scores = np.empty(m, dtype=float)
+
+#     for i, (u, v) in enumerate(edges):
+#         # Handle possible self-loops defensively
+#         if u == v:
+#             scores[i] = 0.0
+#             continue
+
+#         adj_u = adj[u]
+#         adj_v = adj[v]
+
+#         # Iterate over smaller neighborhood for common-neighbor count
+#         if len(adj_u) > len(adj_v):
+#             adj_u, adj_v = adj_v, adj_u
+#             u_deg, v_deg = deg[v], deg[u]
+#         else:
+#             u_deg, v_deg = deg[u], deg[v]
+
+#         cn = 0
+#         for w in adj_u:
+#             if w in adj_v:
+#                 cn += 1
+
+#         if metric == "common_neighbors":
+#             s = float(cn)
+#         elif metric == "jaccard":
+#             # union size = d(u) + d(v) - CN
+#             denom = (u_deg + v_deg - cn) + eps
+#             s = float(cn) / denom
+#         else:  # "cn_over_sqrtdeg" default
+#             denom = math.sqrt(u_deg * v_deg + eps)
+#             s = float(cn) / denom if denom > 0 else 0.0
+
+#         scores[i] = s
+
+#     return scores
 
 
 def mixture_diag_gauss_posteriors(
